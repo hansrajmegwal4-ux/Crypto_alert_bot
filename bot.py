@@ -1,6 +1,5 @@
 import ccxt
 import pandas as pd
-import pandas_ta as ta
 import requests
 
 # आपकी चैट आईडी और बॉट टोकन
@@ -43,7 +42,7 @@ def check_crypto():
         'GALA/USDT', 'CHZ/USDT', 'ENJ/USDT', 'CRV/USDT', 'MKR/USDT'
     ]
     
-    print(f"कुल {len(symbols)} कॉइन्स की 5-इंडिकेटर स्कैनिंग (SL और Targets के साथ) शुरू हो रही है...")
+    print(f"कुल {len(symbols)} कॉइन्स की 5-इंडिकेटर स्कैनिंग शुरू हो रही है...")
 
     for symbol in symbols:
         try:
@@ -53,32 +52,42 @@ def check_crypto():
                 
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             
-            # --- 5 इंडिकेटर्स की गणना ---
-            df['ema9'] = ta.ema(df['close'], length=9)
-            df['ema21'] = ta.ema(df['close'], length=21)
-            df['rsi'] = ta.rsi(df['close'], length=14)
+            # --- 5 इंडिकेटर्स की गणना (Pure Pandas - बिना किसी बाहरी लाइब्रेरी के) ---
+            # 1. EMA (9 और 21)
+            df['ema9'] = df['close'].ewm(span=9, adjust=False).mean()
+            df['ema21'] = df['close'].ewm(span=21, adjust=False).mean()
             
-            macd_df = ta.macd(df['close'], fast=12, slow=26, signal=9)
-            if macd_df is not None and not macd_df.empty:
-                df['macd'] = macd_df['MACD_12_26_9']
-                df['macd_signal'] = macd_df['MACDs_12_26_9']
-            else:
-                continue
-                
-            bb_df = ta.bbands(df['close'], length=20, std=2)
-            if bb_df is not None and not bb_df.empty:
-                df['bb_lower'] = bb_df['BBL_20_2.0']
-                df['bb_upper'] = bb_df['BBU_20_2.0']
-            else:
-                continue
-                
-            df['vol_ma'] = ta.sma(df['volume'], length=20)
+            # 2. RSI (14)
+            delta = df['close'].diff()
+            gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+            loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+            rs = gain / loss
+            df['rsi'] = 100 - (100 / (1 + rs))
+            
+            # 3. MACD (12, 26, 9)
+            exp1 = df['close'].ewm(span=12, adjust=False).mean()
+            exp2 = df['close'].ewm(span=26, adjust=False).mean()
+            df['macd'] = exp1 - exp2
+            df['macd_signal'] = df['macd'].ewm(span=9, adjust=False).mean()
+            
+            # 4. Bollinger Bands (20, 2)
+            rolling_mean = df['close'].rolling(window=20).mean()
+            rolling_std = df['close'].rolling(window=20).std()
+            df['bb_lower'] = rolling_mean - (rolling_std * 2)
+            df['bb_upper'] = rolling_mean + (rolling_std * 2)
+            
+            # 5. Volume SMA (20)
+            df['vol_ma'] = df['volume'].rolling(window=20).mean()
             
             curr = df.iloc[-1]
             prev = df.iloc[-2]
             
             current_price = curr['close']
             current_rsi = curr['rsi']
+            
+            # यदि किसी मान में NaN हो तो आगे बढ़ें
+            if pd.isna(current_rsi) or pd.isna(curr['macd']) or pd.isna(curr['bb_lower']):
+                continue
             
             # --- BUY (Bullish) की 5 शर्तें ---
             is_ema_buy = curr['ema9'] > curr['ema21']
@@ -88,11 +97,10 @@ def check_crypto():
             is_vol_buy = curr['volume'] > curr['vol_ma']
             
             if is_ema_buy and is_rsi_buy and is_macd_buy and is_bb_buy and is_vol_buy:
-                # Buy के लिए Stop Loss और Targets कैलकुलेशन (Risk-Reward के आधार पर)
-                sl = current_price * 0.985       # 1.5% नीचे Stop Loss
-                t1 = current_price * 1.012       # Target 1 (+1.2%)
-                t2 = current_price * 1.025       # Target 2 (+2.5%)
-                t3 = current_price * 1.040       # Target 3 (+4.0%)
+                sl = current_price * 0.985
+                t1 = current_price * 1.012
+                t2 = current_price * 1.025
+                t3 = current_price * 1.040
                 
                 msg = (
                     f"🚀 *5/5 INDICATOR BUY SIGNAL* 🟢\n\n"
@@ -116,11 +124,10 @@ def check_crypto():
             is_vol_sell = curr['volume'] > curr['vol_ma']
             
             if is_ema_sell and is_rsi_sell and is_macd_sell and is_bb_sell and is_vol_sell:
-                # Sell के लिए Stop Loss और Targets कैलकुलेशन
-                sl = current_price * 1.015       # 1.5% ऊपर Stop Loss
-                t1 = current_price * 0.988       # Target 1 (-1.2%)
-                t2 = current_price * 0.975       # Target 2 (-2.5%)
-                t3 = current_price * 0.960       # Target 3 (-4.0%)
+                sl = current_price * 1.015
+                t1 = current_price * 0.988
+                t2 = current_price * 0.975
+                t3 = current_price * 0.960
                 
                 msg = (
                     f"🔻 *5/5 INDICATOR SELL SIGNAL* 🔴\n\n"
