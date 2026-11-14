@@ -2,7 +2,7 @@ name: Run Crypto Alert Bot
 
 on:
   schedule:
-    - cron: '*/15 * * * *'  # हर 15 मिनट में बॉट चलेगा
+    - cron: '*/5 * * * *'  # हर 5 मिनट में बॉट चलेगा
   workflow_dispatch:        # आप चाहें तो इसे बटन दबाकर मैन्युअली भी चला सकते हैं
 
 jobs:
