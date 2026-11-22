@@ -1,14 +1,17 @@
+from datetime import datetime, timezone
 import json
 import os
 import warnings
+
 import pandas as pd
 import requests
 import yfinance as yf
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 
-BOT_NAME = "Sweep Bot V2 (Lean 1h/4h)"
+BOT_NAME = "EMA / Sweep Alert Bot"
 STATE_FILE = "state_v2.json"
+MAX_CANDLE_AGE_HOURS = 12.0
 
 WATCHLIST = {
     "GOLD": "GC=F",
@@ -25,7 +28,8 @@ TIMEFRAME_CONFIG = {
 RR_RATIO = 2.5
 
 TELEGRAM_TOKEN = os.getenv(
-    "TELEGRAM_BOT_TOKEN", "8961051504:AAADD97K5Q2OyMJRg10iUMQRbwMflhdyrw"
+    "TELEGRAM_BOT_TOKEN",
+    "8501051504:AAAD37R5Q2OyBUJrg10LUMQRbwFIndyrw",
 )
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "6292109019")
 
@@ -48,13 +52,28 @@ def save_state(state: dict):
         print(f"State save error: {e}")
 
 
+def is_candle_fresh(candle_time_str: str, max_age_hours: float = MAX_CANDLE_AGE_HOURS) -> bool:
+    try:
+        dt = datetime.fromisoformat(str(candle_time_str))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        else:
+            dt = dt.astimezone(timezone.utc)
+        now_utc = datetime.now(timezone.utc)
+        age_hours = (now_utc - dt).total_seconds() / 3600.0
+        return age_hours <= max_age_hours
+    except Exception as e:
+        print(f"Timestamp parse error ({candle_time_str}): {e}")
+        return False
+
+
 def send_telegram_alert(message: str):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         print(message)
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     try:
-        requests.post(
+        resp = requests.post(
             url,
             json={
                 "chat_id": TELEGRAM_CHAT_ID,
@@ -63,6 +82,7 @@ def send_telegram_alert(message: str):
             },
             timeout=10,
         )
+        resp.raise_for_status()
     except Exception as e:
         print(f"Telegram alert error: {e}")
 
@@ -91,13 +111,11 @@ def fetch_data(ticker: str, interval: str, period: str, ema_period: int) -> pd.D
     return df[["timestamp", "open", "high", "low", "close", "volume", "ema"]]
 
 
-def check_sweep_setup(
-    df: pd.DataFrame, lookback: int, ema_period: int, buffer_pct: float
-):
+def check_sweep_setup(df: pd.DataFrame, lookback: int, ema_period: int, buffer_pct: float):
     if len(df) < max(lookback + 3, ema_period + 3):
         return None
 
-    history = df.iloc[-(lookback + 2):-2]
+    history = df.iloc[-(lookback + 2) : -2]
     swing_low = float(history["low"].min())
     swing_high = float(history["high"].max())
 
@@ -112,30 +130,32 @@ def check_sweep_setup(
     prev_high = float(prev_c["high"])
     prev_low = float(prev_c["low"])
 
-    # Bullish Sweep + Bullish Reclaim
+    # Bullish Sweep + Bullish Reclaim above EMA
     swept_down = (last_low < swing_low) or (prev_low < swing_low)
     if swept_down and (entry > swing_low) and (entry > last_open) and (entry > ema_val):
         sl = min(last_low, prev_low) * (1 - buffer_pct)
         risk = entry - sl
         if risk > 0:
             return {
-                "side": "LONG",
+                "side": "LONG (BUY)",
                 "swept": round(swing_low, 4),
+                "ema": round(ema_val, 4),
                 "entry": round(entry, 4),
                 "sl": round(sl, 4),
                 "target": round(entry + (risk * RR_RATIO), 4),
                 "time": str(last_c["timestamp"]),
             }
 
-    # Bearish Sweep + Bearish Reclaim
+    # Bearish Sweep + Bearish Reclaim below EMA
     swept_up = (last_high > swing_high) or (prev_high > swing_high)
     if swept_up and (entry < swing_high) and (entry < last_open) and (entry < ema_val):
         sl = max(last_high, prev_high) * (1 + buffer_pct)
         risk = sl - entry
         if risk > 0:
             return {
-                "side": "SHORT",
+                "side": "SHORT (SELL)",
                 "swept": round(swing_high, 4),
+                "ema": round(ema_val, 4),
                 "entry": round(entry, 4),
                 "sl": round(sl, 4),
                 "target": round(entry - (risk * RR_RATIO), 4),
@@ -156,19 +176,24 @@ def main():
                 df = fetch_data(ticker, tf, cfg["period"], cfg["ema"])
                 sig = check_sweep_setup(df, cfg["lookback"], cfg["ema"], cfg["buffer"])
                 if sig:
-                    sig_id = f"{sig['time']}_{sig['side']}"
-                    if state.get(key) == sig_id:
+                    if not is_candle_fresh(sig["time"], MAX_CANDLE_AGE_HOURS):
+                        print(f"[{BOT_NAME}] {name} ({tf}) Stale candle skipped: {sig['time']}")
                         continue
 
+                    sig_id = f"{sig['time']}_{sig['side']}"
+                    if state.get(key) == sig_id:
+                        print(f"[{BOT_NAME}] {name} ({tf}) Duplicate skipped: {sig_id}")
+                        continue
+
+                    # पुरानी EMA अलर्ट शैली के अनुसार साफ़ और संक्षिप्त नोटिफिकेशन फ़ॉर्मेट
                     msg = (
-                        f"<b>{BOT_NAME}</b> ({tf})\n"
-                        f"Asset: <b>{name}</b> <code>{ticker}</code>\n"
-                        f"Side: <b>{sig['side']}</b>\n"
-                        f"Swept: <code>{sig['swept']}</code>\n"
-                        f"Entry: <code>{sig['entry']}</code>\n"
-                        f"SL: <code>{sig['sl']}</code>\n"
-                        f"Target (1:{RR_RATIO}): <code>{sig['target']}</code>\n"
-                        f"Time: <code>{sig['time']}</code>"
+                        f"🔔 <b>{name}</b> (<code>{ticker}</code>) | <b>{tf}</b>\n"
+                        f"📌 Signal: <b>{sig['side']}</b>\n"
+                        f"📈 EMA ({cfg['ema']}): <code>{sig['ema']}</code> | Sweep: <code>{sig['swept']}</code>\n"
+                        f"🎯 Entry: <code>{sig['entry']}</code>\n"
+                        f"🛑 SL: <code>{sig['sl']}</code>\n"
+                        f"✅ Target (1:{RR_RATIO}): <code>{sig['target']}</code>\n"
+                        f"🕒 Time: <code>{sig['time']}</code>"
                     )
                     send_telegram_alert(msg)
                     state[key] = sig_id
