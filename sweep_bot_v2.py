@@ -2,7 +2,11 @@ import json
 import os
 import pandas as pd
 import requests
-import yfinance as yf
+import yfinance as yf 
+import warnings
+
+warnings.filterwarnings("ignore", category=FutureWarning)
+
 
 BOT_NAME = "Sweep Bot V2 (Lean 1h/4h)"
 STATE_FILE = "state_v2.json"
