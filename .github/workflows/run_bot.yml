@@ -23,8 +23,10 @@ jobs:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python ema_strategy_bot.py
+
       - name: Run Sweep Bot V2 (Gold & Crude Oil)
         env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_BOT_TOKEN: "8963851584:AAHDD47K5Q20qAURgsBIoMQhBwMfUhdyrxM"
+          TELEGRAM_CHAT_ID: "6292189019"
+          PYTHONWARNINGS: ignore::FutureWarning
         run: python sweep_bot_v2.py
