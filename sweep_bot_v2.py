@@ -1,12 +1,11 @@
 import json
 import os
+import warnings
 import pandas as pd
 import requests
-import yfinance as yf 
-import warnings
+import yfinance as yf
 
 warnings.filterwarnings("ignore", category=FutureWarning)
-
 
 BOT_NAME = "Sweep Bot V2 (Lean 1h/4h)"
 STATE_FILE = "state_v2.json"
@@ -14,19 +13,21 @@ STATE_FILE = "state_v2.json"
 WATCHLIST = {
     "GOLD": "GC=F",
     "CRUDE OIL": "CL=F",
+    "ETHEREUM": "ETH-USD",
+    "SOLANA": "SOL-USD",
 }
 
 TIMEFRAME_CONFIG = {
-    "1h": {"period": "15d", "lookback": 20, "ema": 50, "buffer": 0.0008},
-    "4h": {"period": "60d", "lookback": 18, "ema": 50, "buffer": 0.0010},
+    "1h": {"period": "120d", "lookback": 20, "ema": 50, "buffer": 0.0005},
+    "4h": {"period": "60d", "lookback": 10, "ema": 50, "buffer": 0.0010},
 }
 
 RR_RATIO = 2.5
 
 TELEGRAM_TOKEN = os.getenv(
-    "TELEGRAM_BOT_TOKEN", "8963851584:AAHDD47K5Q20qAURgsBIoMQhBwMfUhdyrxM"
+    "TELEGRAM_BOT_TOKEN", "8961051504:AAADD97K5Q2OyMJRg10iUMQRbwMflhdyrw"
 )
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "6292189019")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "6292109019")
 
 
 def load_state() -> dict:
@@ -55,7 +56,11 @@ def send_telegram_alert(message: str):
     try:
         requests.post(
             url,
-            json={"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"},
+            json={
+                "chat_id": TELEGRAM_CHAT_ID,
+                "text": message,
+                "parse_mode": "HTML",
+            },
             timeout=10,
         )
     except Exception as e:
@@ -83,10 +88,12 @@ def fetch_data(ticker: str, interval: str, period: str, ema_period: int) -> pd.D
     time_col = "Datetime" if "Datetime" in df.columns else "Date"
     df = df.rename(columns={time_col: "timestamp"})
     df["ema"] = df["close"].ewm(span=ema_period, adjust=False).mean()
-    return df[["timestamp", "open", "high", "low", "close", "volume", "ema"]].dropna()
+    return df[["timestamp", "open", "high", "low", "close", "volume", "ema"]]
 
 
-def check_sweep_setup(df: pd.DataFrame, lookback: int, ema_period: int, buffer_pct: float):
+def check_sweep_setup(
+    df: pd.DataFrame, lookback: int, ema_period: int, buffer_pct: float
+):
     if len(df) < max(lookback + 3, ema_period + 3):
         return None
 
@@ -94,8 +101,8 @@ def check_sweep_setup(df: pd.DataFrame, lookback: int, ema_period: int, buffer_p
     swing_low = float(history["low"].min())
     swing_high = float(history["high"].max())
 
-    last_c = df.iloc[-2]
-    prev_c = df.iloc[-3]
+    last_c = df.iloc[-1]
+    prev_c = df.iloc[-2]
 
     entry = float(last_c["close"])
     ema_val = float(last_c["ema"])
@@ -107,7 +114,7 @@ def check_sweep_setup(df: pd.DataFrame, lookback: int, ema_period: int, buffer_p
 
     # Bullish Sweep + Bullish Reclaim
     swept_down = (last_low < swing_low) or (prev_low < swing_low)
-    if swept_down and (entry > swing_low) and (entry > last_open) and (entry >= ema_val * 0.995):
+    if swept_down and (entry > swing_low) and (entry > last_open) and (entry > ema_val):
         sl = min(last_low, prev_low) * (1 - buffer_pct)
         risk = entry - sl
         if risk > 0:
@@ -122,7 +129,7 @@ def check_sweep_setup(df: pd.DataFrame, lookback: int, ema_period: int, buffer_p
 
     # Bearish Sweep + Bearish Reclaim
     swept_up = (last_high > swing_high) or (prev_high > swing_high)
-    if swept_up and (entry < swing_high) and (entry < last_open) and (entry <= ema_val * 1.005):
+    if swept_up and (entry < swing_high) and (entry < last_open) and (entry < ema_val):
         sl = max(last_high, prev_high) * (1 + buffer_pct)
         risk = sl - entry
         if risk > 0:
@@ -154,22 +161,22 @@ def main():
                         continue
 
                     msg = (
-                        f"<b>[{BOT_NAME}]</b> ({tf})\n"
-                        f"Asset: <b>{name}</b> (<code>{ticker}</code>)\n"
+                        f"<b>{BOT_NAME}</b> ({tf})\n"
+                        f"Asset: <b>{name}</b> <code>{ticker}</code>\n"
                         f"Side: <b>{sig['side']}</b>\n"
                         f"Swept: <code>{sig['swept']}</code>\n"
                         f"Entry: <code>{sig['entry']}</code>\n"
                         f"SL: <code>{sig['sl']}</code>\n"
                         f"Target (1:{RR_RATIO}): <code>{sig['target']}</code>\n"
-                        f"Time: {sig['time']}"
+                        f"Time: <code>{sig['time']}</code>"
                     )
                     send_telegram_alert(msg)
                     state[key] = sig_id
                     changed = True
                 else:
-                    print(f"[{BOT_NAME} | {name} | {tf}] No sweep setup.")
+                    print(f"[{BOT_NAME}] {name} ({tf}) No sweep setup.")
             except Exception as e:
-                print(f"[{BOT_NAME} | {name} | {tf}] Error: {e}")
+                print(f"[{BOT_NAME}] {name} ({tf}) Error: {e}")
 
     if changed:
         save_state(state)
