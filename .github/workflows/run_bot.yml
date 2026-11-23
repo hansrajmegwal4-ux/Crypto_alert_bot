@@ -1,4 +1,4 @@
-name: 🫡 Hansraj meghwal 🫡
+name: 🙏 Hansraj meghwal 🙏
 
 on:
   workflow_dispatch:
@@ -29,16 +29,23 @@ jobs:
 
       - name: Run Sweep Bot V2
         env:
-          TELEGRAM_BOT_TOKEN: "8965031504:AAEQO47K5Q2Oq4UHgdbcvd0PBRWTuheyrx8"
+          TELEGRAM_BOT_TOKEN: "8965031504:AAEtQ47KSQ2Oq4uHgdxcvdtPBRnTuheyrx8"
           TELEGRAM_CHAT_ID: "6292189819"
           PYTHONWARNINGS: ignore::FutureWarning
         run: python sweep_bot_v2.py
+
+      - name: Run Commodity Sweep Bot
+        env:
+          TELEGRAM_BOT_TOKEN: "8965031504:AAEtQ47KSQ2Oq4uHgdxcvdtPBRnTuheyrx8"
+          TELEGRAM_CHAT_ID: "6292189819"
+        run: python commodity_sweep_bot/bot.py
 
       - name: Stop repeat notifications
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add sent_alerts.json || true
+          git add commodity_sweep_bot/commodity_sweep_state.json || true
           if ! git diff --staged --quiet; then
             git commit -m "Stop repeat notifications"
             git push
