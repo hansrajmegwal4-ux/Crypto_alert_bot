@@ -1,7 +1,10 @@
-name: 👑 Hansraj meghwal 👑
+name: 🫡 Hansraj meghwal 🫡
 
 on:
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   run-bot:
@@ -24,9 +27,19 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python ema_strategy_bot.py
 
-      - name: Run Sweep Bot V2 (Gold & Crude Oil)
+      - name: Run Sweep Bot V2
         env:
-          TELEGRAM_BOT_TOKEN: "8963851584:AAHDD47K5Q20qAURgsBIoMQhBwMfUhdyrxM"
-          TELEGRAM_CHAT_ID: "6292189019"
+          TELEGRAM_BOT_TOKEN: "8965031504:AAEQO47K5Q2Oq4UHgdbcvd0PBRWTuheyrx8"
+          TELEGRAM_CHAT_ID: "6292189819"
           PYTHONWARNINGS: ignore::FutureWarning
         run: python sweep_bot_v2.py
+
+      - name: Stop repeat notifications
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add sent_alerts.json || true
+          if ! git diff --staged --quiet; then
+            git commit -m "Stop repeat notifications"
+            git push
+          fi
