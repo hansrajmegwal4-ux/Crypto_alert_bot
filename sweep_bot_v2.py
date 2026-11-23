@@ -1,211 +1,178 @@
-from datetime import datetime, timezone
-import json
 import os
-import warnings
-
-import pandas as pd
 import requests
-import yfinance as yf
+import pandas as pd
+import ccxt
 
-warnings.filterwarnings("ignore", category=FutureWarning)
 
-BOT_NAME = "EMA / Sweep Alert Bot"
-STATE_FILE = "state_v2.json"
-MAX_CANDLE_AGE_HOURS = 12.0
-
-WATCHLIST = {
-    "GOLD": "GC=F",
-    "CRUDE OIL": "CL=F",
-    "ETHEREUM": "ETH-USD",
-    "SOLANA": "SOL-USD",
-}
-
-TIMEFRAME_CONFIG = {
-    "1h": {"period": "120d", "lookback": 20, "ema": 50, "buffer": 0.0005},
-    "4h": {"period": "60d", "lookback": 10, "ema": 50, "buffer": 0.0010},
-}
-
-RR_RATIO = 2.5
-
-TELEGRAM_TOKEN = os.getenv(
+# ==========================================
+# कॉन्फ़िगरेशन
+# ==========================================
+TELEGRAM_BOT_TOKEN = os.getenv(
     "TELEGRAM_BOT_TOKEN",
-    "8501051504:AAAD37R5Q2OyBUJrg10LUMQRbwFIndyrw",
+    "8963851584:AAHDD47K5Q20qAURgsBIoMQhBwMfUhdyrxM",
 )
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "6292109019")
+TELEGRAM_CHAT_ID = os.getenv(
+    "TELEGRAM_CHAT_ID",
+    "6292189019",
+)
+
+SYMBOLS = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "BNB/USDT"]
+HTF_TIMEFRAME = "4h"      # रेंज के लिए बड़ा टाइमफ्रेम
+LTF_TIMEFRAME = "15m"     # स्वीप और रिएक्शन के लिए छोटा टाइमफ्रेम
+REWARD_RATIO = 2.0        # फ़ॉलबैक रिस्क-रिवॉर्ड अनुपात
 
 
-def load_state() -> dict:
-    if os.path.exists(STATE_FILE):
-        try:
-            with open(STATE_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            return {}
-    return {}
-
-
-def save_state(state: dict):
+def send_telegram_alert(message: str) -> None:
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": message,
+        "parse_mode": "HTML",
+    }
     try:
-        with open(STATE_FILE, "w", encoding="utf-8") as f:
-            json.dump(state, f, indent=2)
-    except Exception as e:
-        print(f"State save error: {e}")
-
-
-def is_candle_fresh(candle_time_str: str, max_age_hours: float = MAX_CANDLE_AGE_HOURS) -> bool:
-    try:
-        dt = datetime.fromisoformat(str(candle_time_str))
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        else:
-            dt = dt.astimezone(timezone.utc)
-        now_utc = datetime.now(timezone.utc)
-        age_hours = (now_utc - dt).total_seconds() / 3600.0
-        return age_hours <= max_age_hours
-    except Exception as e:
-        print(f"Timestamp parse error ({candle_time_str}): {e}")
-        return False
-
-
-def send_telegram_alert(message: str):
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        print(message)
-        return
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    try:
-        resp = requests.post(
-            url,
-            json={
-                "chat_id": TELEGRAM_CHAT_ID,
-                "text": message,
-                "parse_mode": "HTML",
-            },
-            timeout=10,
-        )
+        resp = requests.post(url, json=payload, timeout=10)
         resp.raise_for_status()
+        print("Telegram alert sent successfully.")
     except Exception as e:
-        print(f"Telegram alert error: {e}")
+        print(f"Telegram error: {e}")
 
 
-def fetch_data(ticker: str, interval: str, period: str, ema_period: int) -> pd.DataFrame:
-    df = yf.download(tickers=ticker, interval=interval, period=period, progress=False)
-    if df is None or df.empty:
-        return pd.DataFrame()
-
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-
-    df = df.rename(
-        columns={
-            "Open": "open",
-            "High": "high",
-            "Low": "low",
-            "Close": "close",
-            "Volume": "volume",
-        }
-    ).reset_index()
-
-    time_col = "Datetime" if "Datetime" in df.columns else "Date"
-    df = df.rename(columns={time_col: "timestamp"})
-    df["ema"] = df["close"].ewm(span=ema_period, adjust=False).mean()
-    return df[["timestamp", "open", "high", "low", "close", "volume", "ema"]]
+def fetch_ohlcv_df(exchange: ccxt.Exchange, symbol: str, timeframe: str, limit: int = 100) -> pd.DataFrame:
+    raw = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+    df = pd.DataFrame(raw, columns=["timestamp", "open", "high", "low", "close", "volume"])
+    df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+    return df
 
 
-def check_sweep_setup(df: pd.DataFrame, lookback: int, ema_period: int, buffer_pct: float):
-    if len(df) < max(lookback + 3, ema_period + 3):
+def analyze_crt_setup(htf_df: pd.DataFrame, ltf_df: pd.DataFrame) -> dict | None:
+    """
+    CRT (कैंडल रेंज थ्योरी) लॉजिक:
+    1. HTF की पिछली बंद कैंडल (iloc[-2]) के High और Low से रेंज तय करता है।
+    2. LTF की हालिया बंद कैंडल्स में स्वीप (Sweep) और रेंज में वापसी देखता है।
+    3. रेंज में रिएक्शन मिलने पर Long या Short सेटअप बनाता है।
+    """
+    if len(htf_df) < 3 or len(ltf_df) < 15:
         return None
 
-    history = df.iloc[-(lookback + 2) : -2]
-    swing_low = float(history["low"].min())
-    swing_high = float(history["high"].max())
+    ref_candle = htf_df.iloc[-2]
+    range_high = float(ref_candle["high"])
+    range_low = float(ref_candle["low"])
+    range_mid = (range_high + range_low) / 2.0
 
-    last_c = df.iloc[-1]
-    prev_c = df.iloc[-2]
+    recent_ltf = ltf_df.iloc[-10:-1].copy()
+    last_closed = ltf_df.iloc[-2]
+    prev_closed = ltf_df.iloc[-3]
+    current_price = float(last_closed["close"])
 
-    entry = float(last_c["close"])
-    ema_val = float(last_c["ema"])
-    last_open = float(last_c["open"])
-    last_high = float(last_c["high"])
-    last_low = float(last_c["low"])
-    prev_high = float(prev_c["high"])
-    prev_low = float(prev_c["low"])
+    # नीचे की लिक्विडिटी स्वीप -> रेंज में वापसी -> बुलिश रिएक्शन (LONG)
+    swept_low = bool((recent_ltf["low"] < range_low).any())
+    back_in_range_from_low = (range_low <= current_price <= range_high)
+    bullish_reaction = (
+        float(last_closed["close"]) > float(last_closed["open"])
+        and float(last_closed["close"]) > float(prev_closed["high"])
+    )
 
-    # Bullish Sweep + Bullish Reclaim above EMA
-    swept_down = (last_low < swing_low) or (prev_low < swing_low)
-    if swept_down and (entry > swing_low) and (entry > last_open) and (entry > ema_val):
-        sl = min(last_low, prev_low) * (1 - buffer_pct)
-        risk = entry - sl
-        if risk > 0:
-            return {
-                "side": "LONG (BUY)",
-                "swept": round(swing_low, 4),
-                "ema": round(ema_val, 4),
-                "entry": round(entry, 4),
-                "sl": round(sl, 4),
-                "target": round(entry + (risk * RR_RATIO), 4),
-                "time": str(last_c["timestamp"]),
-            }
+    if swept_low and back_in_range_from_low and bullish_reaction:
+        sweep_low_extreme = float(recent_ltf["low"].min())
+        entry = current_price
+        stop_loss = sweep_low_extreme
+        risk = entry - stop_loss
+        if risk <= 0:
+            return None
 
-    # Bearish Sweep + Bearish Reclaim below EMA
-    swept_up = (last_high > swing_high) or (prev_high > swing_high)
-    if swept_up and (entry < swing_high) and (entry < last_open) and (entry < ema_val):
-        sl = max(last_high, prev_high) * (1 + buffer_pct)
-        risk = sl - entry
-        if risk > 0:
-            return {
-                "side": "SHORT (SELL)",
-                "swept": round(swing_high, 4),
-                "ema": round(ema_val, 4),
-                "entry": round(entry, 4),
-                "sl": round(sl, 4),
-                "target": round(entry - (risk * RR_RATIO), 4),
-                "time": str(last_c["timestamp"]),
-            }
+        target_1 = range_mid if range_mid > entry else entry + risk * REWARD_RATIO
+        target_2 = range_high if range_high > target_1 else entry + risk * (REWARD_RATIO + 1)
+        rr_ratio = (target_2 - entry) / risk if risk > 0 else REWARD_RATIO
+
+        return {
+            "side": "LONG (Bullish CRT Reversal)",
+            "direction_badge": "🟢 LONG (Bullish CRT Reversal)",
+            "sl_note": "Sweep Low",
+            "t1_label": "Target 1 (Mid Range)",
+            "t2_label": "Target 2 (Range High)",
+            "ltf_candle_time": str(last_closed["timestamp"]),
+            "range_high": range_high,
+            "range_low": range_low,
+            "entry": entry,
+            "stop_loss": stop_loss,
+            "target_1": target_1,
+            "target_2": target_2,
+            "rr_ratio": rr_ratio,
+        }
+
+    # ऊपर की लिक्विडिटी स्वीप -> रेंज में वापसी -> बेयरिश रिएक्शन (SHORT)
+    swept_high = bool((recent_ltf["high"] > range_high).any())
+    back_in_range_from_high = (range_low <= current_price <= range_high)
+    bearish_reaction = (
+        float(last_closed["close"]) < float(last_closed["open"])
+        and float(last_closed["close"]) < float(prev_closed["low"])
+    )
+
+    if swept_high and back_in_range_from_high and bearish_reaction:
+        sweep_high_extreme = float(recent_ltf["high"].max())
+        entry = current_price
+        stop_loss = sweep_high_extreme
+        risk = stop_loss - entry
+        if risk <= 0:
+            return None
+
+        target_1 = range_mid if range_mid < entry else entry - risk * REWARD_RATIO
+        target_2 = range_low if range_low < target_1 else entry - risk * (REWARD_RATIO + 1)
+        rr_ratio = (entry - target_2) / risk if risk > 0 else REWARD_RATIO
+
+        return {
+            "side": "SHORT (Bearish CRT Reversal)",
+            "direction_badge": "🔴 SHORT (Bearish CRT Reversal)",
+            "sl_note": "Sweep High",
+            "t1_label": "Target 1 (Mid Range)",
+            "t2_label": "Target 2 (Range Low)",
+            "ltf_candle_time": str(last_closed["timestamp"]),
+            "range_high": range_high,
+            "range_low": range_low,
+            "entry": entry,
+            "stop_loss": stop_loss,
+            "target_1": target_1,
+            "target_2": target_2,
+            "rr_ratio": rr_ratio,
+        }
 
     return None
 
 
-def main():
-    state = load_state()
-    changed = False
+def format_alert(symbol: str, setup: dict) -> str:
+    return (
+        f"🔱🏛️ <b>हंसराज मेघवाल</b> 🏛️🔱\n"
+        f"🚨 <b>CRT TRADING ALERT</b> 🚨\n\n"
+        f"🪙 <b>Coin Pair:</b> {symbol}\n"
+        f"⏱️ <b>Timeframe:</b> {HTF_TIMEFRAME.upper()} Range ➔ {LTF_TIMEFRAME.upper()} Setup\n"
+        f"🎯 <b>Direction:</b> {setup['direction_badge']}\n"
+        f"📅 <b>LTF Candle:</b> <code>{setup['ltf_candle_time']}</code>\n\n"
+        f"📏 <b>HTF Range:</b>\n"
+        f" • Low: <code>{setup['range_low']:.2f}</code>\n"
+        f" • High: <code>{setup['range_high']:.2f}</code>\n\n"
+        f"⚡ <b>Entry Price:</b> <code>{setup['entry']:.2f}</code>\n"
+        f"🛑 <b>Stop Loss:</b> <code>{setup['stop_loss']:.2f}</code> ({setup['sl_note']})\n\n"
+        f"💰 <b>Take Profit Targets:</b>\n"
+        f" 🎯 {setup['t1_label']}: <code>{setup['target_1']:.2f}</code>\n"
+        f" 🚀 {setup['t2_label']}: <code>{setup['target_2']:.2f}</code>\n\n"
+        f"🔒 <b>Risk/Reward:</b> 1:{setup['rr_ratio']:.1f}"
+    )
 
-    for tf, cfg in TIMEFRAME_CONFIG.items():
-        for name, ticker in WATCHLIST.items():
-            key = f"{ticker}_{tf}"
-            try:
-                df = fetch_data(ticker, tf, cfg["period"], cfg["ema"])
-                sig = check_sweep_setup(df, cfg["lookback"], cfg["ema"], cfg["buffer"])
-                if sig:
-                    if not is_candle_fresh(sig["time"], MAX_CANDLE_AGE_HOURS):
-                        print(f"[{BOT_NAME}] {name} ({tf}) Stale candle skipped: {sig['time']}")
-                        continue
 
-                    sig_id = f"{sig['time']}_{sig['side']}"
-                    if state.get(key) == sig_id:
-                        print(f"[{BOT_NAME}] {name} ({tf}) Duplicate skipped: {sig_id}")
-                        continue
-
-                    # पुरानी EMA अलर्ट शैली के अनुसार साफ़ और संक्षिप्त नोटिफिकेशन फ़ॉर्मेट
-                    msg = (
-                        f"🔔 <b>{name}</b> (<code>{ticker}</code>) | <b>{tf}</b>\n"
-                        f"📌 Signal: <b>{sig['side']}</b>\n"
-                        f"📈 EMA ({cfg['ema']}): <code>{sig['ema']}</code> | Sweep: <code>{sig['swept']}</code>\n"
-                        f"🎯 Entry: <code>{sig['entry']}</code>\n"
-                        f"🛑 SL: <code>{sig['sl']}</code>\n"
-                        f"✅ Target (1:{RR_RATIO}): <code>{sig['target']}</code>\n"
-                        f"🕒 Time: <code>{sig['time']}</code>"
-                    )
-                    send_telegram_alert(msg)
-                    state[key] = sig_id
-                    changed = True
-                else:
-                    print(f"[{BOT_NAME}] {name} ({tf}) No sweep setup.")
-            except Exception as e:
-                print(f"[{BOT_NAME}] {name} ({tf}) Error: {e}")
-
-    if changed:
-        save_state(state)
+def run_once() -> None:
+    exchange = ccxt.coindcx({"enableRateLimit": True})
+    for symbol in SYMBOLS:
+        try:
+            htf_df = fetch_ohlcv_df(exchange, symbol, HTF_TIMEFRAME, limit=50)
+            ltf_df = fetch_ohlcv_df(exchange, symbol, LTF_TIMEFRAME, limit=50)
+            setup = analyze_crt_setup(htf_df, ltf_df)
+            if setup:
+                send_telegram_alert(format_alert(symbol, setup))
+            else:
+                print(f"[{symbol}] No CRT setup.")
+        except Exception as e:
+            print(f"[{symbol}] Error: {e}")
 
 
 if __name__ == "__main__":
-    main()
+    run_once()
