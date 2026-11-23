@@ -160,7 +160,7 @@ def format_alert(symbol: str, setup: dict) -> str:
 
 
 def run_once() -> None:
-    exchange = ccxt.coindcx({"enableRateLimit": True})
+    exchange = ccxt.kucoin({"enableRateLimit": True})
     for symbol in SYMBOLS:
         try:
             htf_df = fetch_ohlcv_df(exchange, symbol, HTF_TIMEFRAME, limit=50)
