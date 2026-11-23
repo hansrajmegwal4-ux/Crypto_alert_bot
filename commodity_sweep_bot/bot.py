@@ -8,6 +8,7 @@ import requests
 
 @dataclass
 class AssetRule:
+    ticker: str
     lookback: int
     min_rejection_ratio: float
     max_candle_range_pct: float
@@ -30,6 +31,7 @@ class MultiCommodityDisciplineConfig:
     state_file: str = "commodity_sweep_bot/commodity_sweep_state.json"
     rules: dict[str, AssetRule] = field(default_factory=lambda: {
         "GOLD": AssetRule(
+            ticker="GC=F",
             lookback=15,
             min_rejection_ratio=0.45,
             max_candle_range_pct=1.8,
@@ -40,6 +42,7 @@ class MultiCommodityDisciplineConfig:
             precaution_note="डेटा/सत्र के समय अचानक स्पाइक से बचें; SL को पीछे न खिसकाएं।",
         ),
         "SILVER": AssetRule(
+            ticker="SI=F",
             lookback=18,
             min_rejection_ratio=0.58,
             max_candle_range_pct=2.5,
@@ -50,6 +53,7 @@ class MultiCommodityDisciplineConfig:
             precaution_note="सिल्वर में फ़ेक स्वीप और दोनों तरफ़ के झटके आम हैं; कम जोखिम व सख़्त SL रखें।",
         ),
         "OIL": AssetRule(
+            ticker="CL=F",
             lookback=15,
             min_rejection_ratio=0.48,
             max_candle_range_pct=2.2,
@@ -62,6 +66,59 @@ class MultiCommodityDisciplineConfig:
     })
 
 
+def fetch_yahoo_candles(ticker: str, interval: str = "15m", range_span: str = "5d") -> list[dict]:
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
+    headers = {"User-Agent": "Mozilla/5.0"}
+
+    try:
+        resp = requests.get(
+            url,
+            params={"interval": interval, "range": range_span},
+            headers=headers,
+            timeout=15,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+        result = payload.get("chart", {}).get("result", [])
+        if not result:
+            return []
+
+        item = result[0]
+        timestamps = item.get("timestamp") or []
+        quote_list = item.get("indicators", {}).get("quote") or []
+        if not timestamps or not quote_list:
+            return []
+
+        q = quote_list[0]
+        opens = q.get("open") or []
+        highs = q.get("high") or []
+        lows = q.get("low") or []
+        closes = q.get("close") or []
+        volumes = q.get("volume") or []
+
+        candles: list[dict] = []
+        for idx, ts in enumerate(timestamps):
+            o = opens[idx] if idx < len(opens) else None
+            h = highs[idx] if idx < len(highs) else None
+            l = lows[idx] if idx < len(lows) else None
+            c = closes[idx] if idx < len(closes) else None
+            v = volumes[idx] if idx < len(volumes) else 0
+            if None in (o, h, l, c):
+                continue
+            candles.append({
+                "ts": int(ts),
+                "open": float(o),
+                "high": float(h),
+                "low": float(l),
+                "close": float(c),
+                "volume": float(v or 0),
+            })
+        return candles
+    except Exception as exc:
+        print(f"[ERROR] {ticker} कैंडल डेटा लाने में समस्या: {exc}")
+        return []
+
+
 def is_sensitive_market_window_ist(cfg: MultiCommodityDisciplineConfig) -> tuple[bool, str]:
     ist_now = datetime.now(timezone(timedelta(hours=5, minutes=30)))
     if ist_now.hour in cfg.sensitive_ist_hours:
@@ -69,7 +126,7 @@ def is_sensitive_market_window_ist(cfg: MultiCommodityDisciplineConfig) -> tuple
     return False, f"IST {ist_now.strftime('%H:%M')} (सामान्य विंडो)"
 
 
-def evaluate_commodity_sweep(symbol: str, candles: list[dict], rule: AssetRule) -> tuple[dict | None, str | None]:
+def evaluate_commodity_sweep(candles: list[dict], rule: AssetRule) -> tuple[dict | None, str | None]:
     if len(candles) < rule.lookback + 5:
         return None, None
 
@@ -160,6 +217,7 @@ def load_state(path: str) -> dict:
         "trades_today": 0,
         "losses_today": 0,
         "last_alert_ts": {},
+        "last_candle_ts": {},
         "stand_down_sent": False,
         "last_caution_note": "",
     }
@@ -169,7 +227,10 @@ def load_state(path: str) -> dict:
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
-        return default if data.get("date") != today else data
+        if data.get("date") != today:
+            return default
+        data.setdefault("last_candle_ts", {})
+        return data
     except Exception:
         return default
 
@@ -181,8 +242,16 @@ def save_state(path: str, state: dict) -> None:
 
 
 def send_telegram(text: str) -> None:
-    token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-    chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+    token = (
+        os.getenv("TELEGRAM_BOT_TOKEN")
+        or os.getenv("TELEGRAM_TOKEN")
+        or "8965031504:AAEtQ47KSQ2Oq4uHgdxcvdtPBRnTuheyrx8"
+    ).strip()
+    chat_id = (
+        os.getenv("TELEGRAM_CHAT_ID")
+        or "6292189819"
+    ).strip()
+
     if not token or not chat_id:
         print(text)
         return
@@ -237,10 +306,102 @@ def build_alert_message(
     )
 
 
-def run_multi_commodity_bot(
-    candles_by_symbol: dict[str, list[dict]],
-    cfg: MultiCommodityDisciplineConfig | None = None,
-) -> None:
+def simulate_trade_outcome(
+    candles: list[dict],
+    entry_idx: int,
+    setup: dict,
+    max_forward_candles: int = 40,
+) -> str:
+    side = setup["side"]
+    sl = setup["sl"]
+    target_2 = setup["target_2"]
+    end_idx = min(len(candles) - 1, entry_idx + max_forward_candles)
+
+    for idx in range(entry_idx + 1, end_idx + 1):
+        c = candles[idx]
+        if side == "SHORT":
+            if c["high"] >= sl:
+                return "LOSS"
+            if c["low"] <= target_2:
+                return "WIN"
+        else:
+            if c["low"] <= sl:
+                return "LOSS"
+            if c["high"] >= target_2:
+                return "WIN"
+
+    return "OPEN"
+
+
+def backtest_symbol(
+    symbol: str,
+    candles: list[dict],
+    rule: AssetRule,
+    max_forward_candles: int = 40,
+) -> dict:
+    wins = 0
+    losses = 0
+    open_trades = 0
+    skipped_spikes = 0
+
+    if len(candles) < rule.lookback + 10:
+        return {
+            "symbol": symbol,
+            "total_closed": 0,
+            "wins": 0,
+            "losses": 0,
+            "open": 0,
+            "skipped_spikes": 0,
+            "win_rate_pct": 0.0,
+        }
+
+    for i in range(rule.lookback + 5, len(candles) - 1):
+        slice_candles = candles[: i + 1]
+        setup, skip_reason = evaluate_commodity_sweep(slice_candles, rule)
+        if skip_reason:
+            skipped_spikes += 1
+            continue
+        if not setup:
+            continue
+
+        outcome = simulate_trade_outcome(candles, i, setup, max_forward_candles)
+        if outcome == "WIN":
+            wins += 1
+        elif outcome == "LOSS":
+            losses += 1
+        else:
+            open_trades += 1
+
+    closed = wins + losses
+    win_rate = (wins / closed * 100.0) if closed > 0 else 0.0
+    return {
+        "symbol": symbol,
+        "total_closed": closed,
+        "wins": wins,
+        "losses": losses,
+        "open": open_trades,
+        "skipped_spikes": skipped_spikes,
+        "win_rate_pct": round(win_rate, 2),
+    }
+
+
+def run_backtest_report(cfg: MultiCommodityDisciplineConfig | None = None) -> None:
+    cfg = cfg or MultiCommodityDisciplineConfig()
+    print("=== COMMODITY LIQUIDITY SWEEP BACKTEST REPORT ===")
+    for symbol in ("GOLD", "SILVER", "OIL"):
+        rule = cfg.rules.get(symbol)
+        if not rule:
+            continue
+        candles = fetch_yahoo_candles(rule.ticker, interval="15m", range_span="5d")
+        res = backtest_symbol(symbol, candles, rule)
+        print(
+            f"{res['symbol']}: Closed={res['total_closed']} "
+            f"(Wins={res['wins']}, Losses={res['losses']}, Open={res['open']}) | "
+            f"Win Rate={res['win_rate_pct']}% | Skipped Spikes={res['skipped_spikes']}"
+        )
+
+
+def run_multi_commodity_bot(cfg: MultiCommodityDisciplineConfig | None = None) -> None:
     cfg = cfg or MultiCommodityDisciplineConfig()
     state = load_state(cfg.state_file)
 
@@ -273,15 +434,24 @@ def run_multi_commodity_bot(
     cooldown_sec = cfg.cooldown_minutes * 60
 
     for symbol in ("GOLD", "SILVER", "OIL"):
-        if symbol not in candles_by_symbol or symbol not in cfg.rules:
+        rule = cfg.rules.get(symbol)
+        if not rule:
             continue
         if now_ts - state["last_alert_ts"].get(symbol, 0) < cooldown_sec:
             continue
 
-        rule = cfg.rules[symbol]
-        setup, skip_reason = evaluate_commodity_sweep(symbol, candles_by_symbol[symbol], rule)
+        candles = fetch_yahoo_candles(rule.ticker, interval="15m", range_span="5d")
+        if not candles:
+            continue
+
+        latest_candle_ts = candles[-1]["ts"]
+        if state["last_candle_ts"].get(symbol) == latest_candle_ts:
+            continue
+
+        setup, skip_reason = evaluate_commodity_sweep(candles, rule)
         if skip_reason:
             print(f"[CAUTION - {symbol}] {skip_reason}")
+            state["last_candle_ts"][symbol] = latest_candle_ts
             continue
         if not setup:
             continue
@@ -292,6 +462,7 @@ def run_multi_commodity_bot(
 
         state["trades_today"] += 1
         state["last_alert_ts"][symbol] = now_ts
+        state["last_candle_ts"][symbol] = latest_candle_ts
 
         sizing = {
             "max_loss_inr": round(max_loss_inr, 2),
@@ -304,76 +475,8 @@ def run_multi_commodity_bot(
         if state["trades_today"] >= cfg.max_total_daily_trades:
             break
 
-    save_state(cfg.state_file, state
-    def fetch_yahoo_candles(ticker: str, interval: str = "15m", range_span: str = "5d") -> list[dict]:
-    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
-    resp = requests.get(
-        url,
-        params={"interval": interval, "range": range_span},
-        headers={"User-Agent": "Mozilla/5.0"},
-        timeout=15,
-    )
-    resp.raise_for_status()
-    result = resp.json().get("chart", {}).get("result", [])
-    if not result:
-        return []
-    q = result[0]["indicators"]["quote"][0]
-    candles = []
-    for i, ts in enumerate(result[0]["timestamp"]):
-        if None in (q["open"][i], q["high"][i], q["low"][i], q["close"][i]):
-            continue
-        candles.append({
-            "ts": int(ts),
-            "open": float(q["open"][i]),
-            "high": float(q["high"][i]),
-            "low": float(q["low"][i]),
-            "close": float(q["close"][i]),
-        })
-    return candles
-
-
-def simulate_trade_outcome(candles: list[dict], entry_idx: int, setup: dict, max_forward_candles: int = 40) -> str:
-    side, sl, target_2 = setup["side"], setup["sl"], setup["target_2"]
-    for idx in range(entry_idx + 1, min(len(candles), entry_idx + max_forward_candles + 1)):
-        c = candles[idx]
-        if side == "SHORT":
-            if c["high"] >= sl:
-                return "LOSS"
-            if c["low"] <= target_2:
-                return "WIN"
-        else:
-            if c["low"] <= sl:
-                return "LOSS"
-            if c["high"] >= target_2:
-                return "WIN"
-    return "OPEN"
-
-
-def run_backtest_report(cfg: MultiCommodityDisciplineConfig | None = None) -> None:
-    cfg = cfg or MultiCommodityDisciplineConfig()
-    tickers = {"GOLD": "GC=F", "SILVER": "SI=F", "OIL": "CL=F"}
-    print("=== COMMODITY LIQUIDITY SWEEP BACKTEST REPORT ===")
-    for symbol in ("GOLD", "SILVER", "OIL"):
-        rule = cfg.rules[symbol]
-        candles = fetch_yahoo_candles(tickers[symbol])
-        wins = losses = open_t = 0
-        for i in range(rule.lookback + 5, len(candles) - 1):
-            setup, _ = evaluate_commodity_sweep(symbol, candles[: i + 1], rule)
-            if not setup:
-                continue
-            res = simulate_trade_outcome(candles, i, setup)
-            if res == "WIN":
-                wins += 1
-            elif res == "LOSS":
-                losses += 1
-            else:
-                open_t += 1
-        closed = wins + losses
-        wr = round((wins / closed * 100.0), 2) if closed > 0 else 0.0
-        print(f"{symbol}: Closed={closed} (Wins={wins}, Losses={losses}, Open={open_t}) | Win Rate={wr}%")
+    save_state(cfg.state_file, state)
 
 
 if __name__ == "__main__":
-    tickers = {"GOLD": "GC=F", "SILVER": "SI=F", "OIL": "CL=F"}
-    live_data = {sym: fetch_yahoo_candles(tkr) for sym, tkr in tickers.items()}
-    run_multi_commodity_bot(live_data)
+    run_multi_commodity_bot()
