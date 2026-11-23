@@ -304,9 +304,76 @@ def run_multi_commodity_bot(
         if state["trades_today"] >= cfg.max_total_daily_trades:
             break
 
-    save_state(cfg.state_file, state)
+    save_state(cfg.state_file, state
+    def fetch_yahoo_candles(ticker: str, interval: str = "15m", range_span: str = "5d") -> list[dict]:
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
+    resp = requests.get(
+        url,
+        params={"interval": interval, "range": range_span},
+        headers={"User-Agent": "Mozilla/5.0"},
+        timeout=15,
+    )
+    resp.raise_for_status()
+    result = resp.json().get("chart", {}).get("result", [])
+    if not result:
+        return []
+    q = result[0]["indicators"]["quote"][0]
+    candles = []
+    for i, ts in enumerate(result[0]["timestamp"]):
+        if None in (q["open"][i], q["high"][i], q["low"][i], q["close"][i]):
+            continue
+        candles.append({
+            "ts": int(ts),
+            "open": float(q["open"][i]),
+            "high": float(q["high"][i]),
+            "low": float(q["low"][i]),
+            "close": float(q["close"][i]),
+        })
+    return candles
+
+
+def simulate_trade_outcome(candles: list[dict], entry_idx: int, setup: dict, max_forward_candles: int = 40) -> str:
+    side, sl, target_2 = setup["side"], setup["sl"], setup["target_2"]
+    for idx in range(entry_idx + 1, min(len(candles), entry_idx + max_forward_candles + 1)):
+        c = candles[idx]
+        if side == "SHORT":
+            if c["high"] >= sl:
+                return "LOSS"
+            if c["low"] <= target_2:
+                return "WIN"
+        else:
+            if c["low"] <= sl:
+                return "LOSS"
+            if c["high"] >= target_2:
+                return "WIN"
+    return "OPEN"
+
+
+def run_backtest_report(cfg: MultiCommodityDisciplineConfig | None = None) -> None:
+    cfg = cfg or MultiCommodityDisciplineConfig()
+    tickers = {"GOLD": "GC=F", "SILVER": "SI=F", "OIL": "CL=F"}
+    print("=== COMMODITY LIQUIDITY SWEEP BACKTEST REPORT ===")
+    for symbol in ("GOLD", "SILVER", "OIL"):
+        rule = cfg.rules[symbol]
+        candles = fetch_yahoo_candles(tickers[symbol])
+        wins = losses = open_t = 0
+        for i in range(rule.lookback + 5, len(candles) - 1):
+            setup, _ = evaluate_commodity_sweep(symbol, candles[: i + 1], rule)
+            if not setup:
+                continue
+            res = simulate_trade_outcome(candles, i, setup)
+            if res == "WIN":
+                wins += 1
+            elif res == "LOSS":
+                losses += 1
+            else:
+                open_t += 1
+        closed = wins + losses
+        wr = round((wins / closed * 100.0), 2) if closed > 0 else 0.0
+        print(f"{symbol}: Closed={closed} (Wins={wins}, Losses={losses}, Open={open_t}) | Win Rate={wr}%")
 
 
 if __name__ == "__main__":
-    live_data: dict[str, list[dict]] = {}
+    tickers = {"GOLD": "GC=F", "SILVER": "SI=F", "OIL": "CL=F"}
+    live_data = {sym: fetch_yahoo_candles(tkr) for sym, tkr in tickers.items()}
     run_multi_commodity_bot(live_data)
