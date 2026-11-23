@@ -1,0 +1,38 @@
+name: Commodity Liquidity Sweep Bot (5m)
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/5 * * * *"
+
+permissions:
+  contents: write
+
+jobs:
+  run-commodity-bot:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r commodity_sweep_bot/requirements.txt
+
+      - name: Run commodity sweep discipline bot
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python commodity_sweep_bot/bot.py
+
+      - name: Save daily state back to repo
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add commodity_sweep_bot/commodity_sweep_state.json || true
+          git commit -m "Update daily commodity sweep state" || exit 0
+          git push
