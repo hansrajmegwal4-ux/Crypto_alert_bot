@@ -1,274 +1,201 @@
 import os
-import json
 import requests
-import ccxt
 import pandas as pd
+import ccxt
 
-# ================== कॉन्फ़िगरेशन ==================
-TELEGRAM_TOKEN = os.getenv(
-    "TELEGRAM_TOKEN",
-    "8463951584:AAHDD47KSQJoQAURgsBiHRDNbWMfuhdyrxM",
-)  #[span_1](start_span)[span_1](end_span)
+
+# ==========================================
+# कॉन्फ़िगरेशन (Telegram और Strategy)
+# ==========================================
+TELEGRAM_BOT_TOKEN = os.getenv(
+    "TELEGRAM_BOT_TOKEN",
+    "8963851584:AAHDD47K5Q20qAURgsBIoMQhBwMfUhdyrxM",
+)
 TELEGRAM_CHAT_ID = os.getenv(
     "TELEGRAM_CHAT_ID",
-    "6292109019",
-)  #[span_2](start_span)[span_2](end_span)
+    "6292189019",
+)
 
-COINS = [
+EXCHANGE_ID = "kucoin"
+SYMBOLS = [
     "BTC/USDT",
     "ETH/USDT",
     "SOL/USDT",
     "BNB/USDT",
     "XRP/USDT",
-    "ADA/USDT",
-    "AVAX/USDT",
-    "LINK/USDT",
-    "DOT/USDT",
-    "SUI/USDT",
-    "LTC/USDT",
-    "TRX/USDT",
 ]
-
-TIMEFRAMES = ["15m", "1h"]
-STATE_FILE = "last_alerts.json"
-
-# सुरक्षा / कन्फर्मेशन पैरामीटर
-SL_BUFFER_PCT = 0.005        # 0.5% अतिरिक्त स्टॉप-लॉस बफ़र
-MAX_EXTENSION_PCT = 4.5      # असामान्य रूप से चौड़े मूव/स्पाइक से बचाव
-UPPER_WICK_RATIO = 0.35      # कम से कम 35% ऊपरी रिजेक्शन विक
+TIMEFRAME = "15m"         # विकल्प: "15m", "30m", "1h", "4h"
+FAST_EMA = 9              # शॉर्ट-टर्म EMA
+SLOW_EMA = 20             # मिड-टर्म EMA
+REWARD_RATIO = 3.0        # आदर्श रिस्क-रिवॉर्ड (1:3)
+SWING_LOOKBACK = 6        # स्विंग हाई/लो स्टॉप लॉस के लिए पिछली कैंडल्स
 
 
-def load_state():
-    if os.path.exists(STATE_FILE):
-        try:
-            with open(STATE_FILE, "r") as f:
-                return json.load(f)
-        except Exception:
-            return {}
-    return {}
-
-
-def save_state(state):
-    try:
-        with open(STATE_FILE, "w") as f:
-            json.dump(state, f)
-    except Exception as e:
-        print(f"State Save Error: {e}")
-
-
-def send_telegram_alert(message):
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        print("Telegram credentials missing. Set TELEGRAM_TOKEN and TELEGRAM_CHAT_ID.")
-        return
-
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+def send_telegram_alert(message: str) -> None:
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
         "text": message,
         "parse_mode": "HTML",
     }
     try:
-        response = requests.post(url, json=payload, timeout=10)
-        response.raise_for_status()
+        resp = requests.post(url, json=payload, timeout=10)
+        resp.raise_for_status()
+        print("Telegram alert sent successfully.")
     except Exception as e:
-        print(f"Telegram Error: {e}")
+        print(f"Telegram error: {e}")
 
 
-def fetch_data(exchange, symbol, timeframe, limit=100):
-    ohlcv = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
-    df = pd.DataFrame(
-        ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"]
-    )
+def create_exchange() -> ccxt.Exchange:
+    exchange_cls = getattr(ccxt, EXCHANGE_ID)
+    return exchange_cls({"enableRateLimit": True})
+
+
+def fetch_ohlcv_df(exchange: ccxt.Exchange, symbol: str, timeframe: str, limit: int = 120) -> pd.DataFrame:
+    raw = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+    df = pd.DataFrame(raw, columns=["timestamp", "open", "high", "low", "close", "volume"])
+    df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
     return df
 
 
-def analyze_strategy(df):
-    if len(df) < 30:
+def is_choppy_market(df: pd.DataFrame, lookback: int = 8) -> bool:
+    """
+    यदि 9 EMA और 20 EMA हाल की कैंडल्स में बार-बार ऊपर-नीचे क्रॉस कर रहे हैं,
+    तो इसे रेंज-बाउंड / साइडवेज़ मार्केट मानकर स्किप करता है।
+    """
+    recent = df.iloc[-lookback - 1 : -1]
+    above = recent["ema_9"] > recent["ema_20"]
+    cross_count = int((above != above.shift(1)).iloc[1:].sum())
+    return cross_count >= 3
+
+
+def analyze_9_20_ema_strategy(df: pd.DataFrame) -> dict | None:
+    """
+    वेरिफ़ाइड 9/20 EMA स्ट्रैटेजी लॉजिक:
+    1. 9 EMA और 20 EMA निकालता है।
+    2. रेंज-बाउंड/चॉपी मार्केट से बचता है।
+    3. बुलिश ट्रेंड (EMA 9 > EMA 20) में 9 EMA / 9-20 ज़ोन के पास पुलबैक और बुलिश कन्फर्मेशन पर LONG देता है।
+    4. बेयरिश ट्रेंड (EMA 9 < EMA 20) में 9 EMA / 9-20 ज़ोन के पास पुलबैक और बेयरिश कन्फर्मेशन पर SHORT देता है।
+    """
+    if len(df) < SLOW_EMA + SWING_LOOKBACK + 5:
         return None
 
-    # 1. 9 EMA और 20 EMA की गणना
-    df["ema9"] = df["close"].ewm(span=9, adjust=False).mean()
-    df["ema20"] = df["close"].ewm(span=20, adjust=False).mean()
+    df = df.copy()
+    df["ema_9"] = df["close"].ewm(span=FAST_EMA, adjust=False).mean()
+    df["ema_20"] = df["close"].ewm(span=SLOW_EMA, adjust=False).mean()
 
-    # आखिरी पूरी तरह बंद हुई कैंडल (-2) और पिछली कैंडल्स
-    curr = df.iloc[-2]
-    prev = df.iloc[-3]
-    prev2 = df.iloc[-4]
-    recent_swing_candles = df.iloc[-10:-2]  # पिछले 8 बंद कैंडल्स का स्विंग दायरा
-
-    # 2. जिग-जैग साइडवेज़ फ़िल्टर (पिछली 6 बंद कैंडल्स में >= 2 क्रॉस हों तो स्किप करें)
-    crosses = 0
-    for i in range(-6, -1):
-        c0 = df.iloc[i]
-        c1 = df.iloc[i - 1]
-        if (c0["ema9"] > c0["ema20"] and c1["ema9"] <= c1["ema20"]) or (
-            c0["ema9"] < c0["ema20"] and c1["ema9"] >= c1["ema20"]
-        ):
-            crosses += 1
-
-    if crosses >= 2:
+    if is_choppy_market(df):
         return None
 
-    candle_ts = int(curr["timestamp"])
-    candle_range = max(curr["high"] - curr["low"], 1e-9)
+    last_closed = df.iloc[-2]
+    prev_closed = df.iloc[-3]
+    swing_slice = df.iloc[-SWING_LOOKBACK - 2 : -2]
 
-    # ================== BULLISH (BUY) सेटअप ==================
-    is_uptrend = (
-        (curr["ema9"] > curr["ema20"])
-        and (prev["ema9"] > prev["ema20"])
-        and (prev2["ema9"] >= prev2["ema20"])
-    )
+    ema9_curr = float(last_closed["ema_9"])
+    ema20_curr = float(last_closed["ema_20"])
+    open_curr = float(last_closed["open"])
+    high_curr = float(last_closed["high"])
+    low_curr = float(last_closed["low"])
+    close_curr = float(last_closed["close"])
+    prev_high = float(prev_closed["high"])
+    prev_low = float(prev_closed["low"])
 
-    if is_uptrend:
-        pullback_zone = max(curr["ema9"], curr["ema20"]) * 1.002
-        pullback_hit = (curr["low"] <= pullback_zone) or (prev["low"] <= pullback_zone)
+    # बुलिश ट्रेंड: 9 EMA ऊपर, 20 EMA नीचे और विस्तार (ema9 > ema20)
+    bullish_trend = ema9_curr > ema20_curr and (ema9_curr - ema20_curr) / ema20_curr >= 0.0015
+    touched_bull_zone = (low_curr <= ema9_curr * 1.0015) and (close_curr >= ema20_curr)
+    bullish_confirmation = (close_curr > open_curr) and (close_curr > prev_high)
 
-        prev_was_strong_red = (
-            (prev["close"] < prev["open"])
-            and ((prev["open"] - prev["close"]) > (candle_range * 0.6))
-        )
+    if bullish_trend and touched_bull_zone and bullish_confirmation:
+        swing_low = float(swing_slice["low"].min())
+        stop_loss = min(swing_low, low_curr)
+        entry = close_curr
+        risk = entry - stop_loss
+        if risk <= 0:
+            return None
 
-        lower_wick = min(curr["open"], curr["close"]) - curr["low"]
-        strong_lower_rejection = (lower_wick / candle_range) >= UPPER_WICK_RATIO
+        target_1 = entry + (risk * 2.0)
+        target_2 = entry + (risk * REWARD_RATIO)
 
-        bull_confirm = (
-            (curr["close"] > curr["open"])
-            and (curr["close"] > curr["ema9"])
-            and (curr["close"] > curr["ema20"])
-            and strong_lower_rejection
-            and (not prev_was_strong_red)
-        )
+        return {
+            "side": "LONG (9/20 EMA Pullback)",
+            "direction_badge": "🟢 LONG (9/20 EMA Pullback)",
+            "candle_time": str(last_closed["timestamp"]),
+            "ema_9": ema9_curr,
+            "ema_20": ema20_curr,
+            "entry": entry,
+            "stop_loss": stop_loss,
+            "target_1": target_1,
+            "target_2": target_2,
+            "trail_exit": ema20_curr,
+            "rr_ratio": REWARD_RATIO,
+        }
 
-        if pullback_hit and bull_confirm:
-            entry = float(curr["close"])
-            swing_low = float(recent_swing_candles["low"].min())
-            raw_sl = min(swing_low, float(curr["ema20"])) * (1.0 - SL_BUFFER_PCT)
-            stop_loss = min(raw_sl, entry * 0.992)
+    # बेयरिश ट्रेंड: 9 EMA नीचे, 20 EMA ऊपर और विस्तार (ema9 < ema20)
+    bearish_trend = ema9_curr < ema20_curr and (ema20_curr - ema9_curr) / ema20_curr >= 0.0015
+    touched_bear_zone = (high_curr >= ema9_curr * 0.9985) and (close_curr <= ema20_curr)
+    bearish_confirmation = (close_curr < open_curr) and (close_curr < prev_low)
 
-            risk = entry - stop_loss
-            risk_pct = (risk / entry) * 100 if entry > 0 else 0
-            if risk <= 0 or risk_pct > MAX_EXTENSION_PCT:
-                return None
+    if bearish_trend and touched_bear_zone and bearish_confirmation:
+        swing_high = float(swing_slice["high"].max())
+        stop_loss = max(swing_high, high_curr)
+        entry = close_curr
+        risk = stop_loss - entry
+        if risk <= 0:
+            return None
 
-            target_1 = entry + (risk * 1.5)
-            target_2 = entry + (risk * 2.0)
-            target_3 = entry + (risk * 3.0)
+        target_1 = entry - (risk * 2.0)
+        target_2 = entry - (risk * REWARD_RATIO)
 
-            return {
-                "id": f"{candle_ts}_BUY",
-                "type": "BUY / LONG 🟢",
-                "trend_note": "Uptrend Pullback + Strong Lower Rejection",
-                "entry": entry,
-                "stop_loss": stop_loss,
-                "target_1": target_1,
-                "target_2": target_2,
-                "target_3": target_3,
-                "ema9": float(curr["ema9"]),
-                "ema20": float(curr["ema20"]),
-                "exit_rule": "यदि कैंडल 20 EMA के नीचे क्लोज़ हो तो ट्रेड से निकलें/ट्रेल करें।",
-            }
-
-    # ================== BEARISH (SELL) सेटअप ==================
-    is_downtrend = (
-        (curr["ema9"] < curr["ema20"])
-        and (prev["ema9"] < prev["ema20"])
-        and (prev2["ema9"] <= prev2["ema20"])
-    )
-
-    if is_downtrend:
-        pullback_zone = min(curr["ema9"], curr["ema20"]) * 0.998
-        pullback_hit = (curr["high"] >= pullback_zone) or (prev["high"] >= pullback_zone)
-
-        prev_was_strong_green = (
-            (prev["close"] > prev["open"])
-            and ((prev["close"] - prev["open"]) > (candle_range * 0.6))
-        )
-
-        upper_wick = curr["high"] - max(curr["open"], curr["close"])
-        strong_upper_rejection = (upper_wick / candle_range) >= UPPER_WICK_RATIO
-
-        bear_confirm = (
-            (curr["close"] < curr["open"])
-            and (curr["close"] < curr["ema9"])
-            and (curr["close"] < curr["ema20"])
-            and strong_upper_rejection
-            and (not prev_was_strong_green)
-        )
-
-        if pullback_hit and bear_confirm:
-            entry = float(curr["close"])
-            swing_high = float(recent_swing_candles["high"].max())
-            raw_sl = max(swing_high, float(curr["ema20"])) * (1.0 + SL_BUFFER_PCT)
-            stop_loss = max(raw_sl, entry * 1.008)
-
-            risk = stop_loss - entry
-            risk_pct = (risk / entry) * 100 if entry > 0 else 0
-            if risk <= 0 or risk_pct > MAX_EXTENSION_PCT:
-                return None
-
-            target_1 = entry - (risk * 1.5)
-            target_2 = entry - (risk * 2.0)
-            target_3 = entry - (risk * 3.0)
-
-            return {
-                "id": f"{candle_ts}_SELL",
-                "type": "SELL / SHORT 🔴",
-                "trend_note": "Downtrend Pullback + Strong Upper Rejection",
-                "entry": entry,
-                "stop_loss": stop_loss,
-                "target_1": target_1,
-                "target_2": target_2,
-                "target_3": target_3,
-                "ema9": float(curr["ema9"]),
-                "ema20": float(curr["ema20"]),
-                "exit_rule": "यदि कैंडल 20 EMA के ऊपर क्लोज़ हो तो ट्रेड से निकलें/ट्रेल करें।",
-            }
+        return {
+            "side": "SHORT (9/20 EMA Pullback)",
+            "direction_badge": "🔴 SHORT (9/20 EMA Pullback)",
+            "candle_time": str(last_closed["timestamp"]),
+            "ema_9": ema9_curr,
+            "ema_20": ema20_curr,
+            "entry": entry,
+            "stop_loss": stop_loss,
+            "target_1": target_1,
+            "target_2": target_2,
+            "trail_exit": ema20_curr,
+            "rr_ratio": REWARD_RATIO,
+        }
 
     return None
 
 
-def main():
-    exchange = ccxt.binance({"enableRateLimit": True})
-    state = load_state()
-    state_changed = False
+def format_alert(symbol: str, setup: dict) -> str:
+    return (
+        f"🔱🏛️ <b>हंसराज मेघवाल</b> 🏛️🔱\n"
+        f"📈 <b>9/20 EMA TRADING ALERT</b> 📈\n\n"
+        f"🪙 <b>Coin Pair:</b> {symbol}\n"
+        f"⏱️ <b>Timeframe:</b> {TIMEFRAME.upper()}\n"
+        f"🎯 <b>Direction:</b> {setup['direction_badge']}\n"
+        f"📅 <b>Candle:</b> <code>{setup['candle_time']}</code>\n\n"
+        f"📊 <b>EMA Levels:</b>\n"
+        f" • 9 EMA: <code>{setup['ema_9']:.2f}</code>\n"
+        f" • 20 EMA: <code>{setup['ema_20']:.2f}</code>\n\n"
+        f"⚡ <b>Entry Price:</b> <code>{setup['entry']:.2f}</code>\n"
+        f"🛑 <b>Stop Loss:</b> <code>{setup['stop_loss']:.2f}</code>\n\n"
+        f"💰 <b>Take Profit Targets:</b>\n"
+        f" 🎯 Target 1 (1:2): <code>{setup['target_1']:.2f}</code>\n"
+        f" 🚀 Target 2 (1:{setup['rr_ratio']:.0f}): <code>{setup['target_2']:.2f}</code>\n\n"
+        f"🛡️ <b>Trail/Exit Rule:</b> Close beyond 20 EMA (<code>{setup['trail_exit']:.2f}</code>)"
+    )
 
-    for symbol in COINS:
-        for tf in TIMEFRAMES:
-            try:
-                df = fetch_data(exchange, symbol, tf)
-                signal = analyze_strategy(df)
 
-                if signal:
-                    key = f"{symbol}_{tf}"
-                    if state.get(key) == signal["id"]:
-                        print(f"Duplicate skipped for {key} ({signal['id']})")
-                        continue
-
-                    msg = (
-                        f"🚨 <b>9/20 EMA STRATEGY ALERT</b> 🚨\n\n"
-                        f"🪙 <b>Coin:</b> {symbol}\n"
-                        f"⏱️ <b>Timeframe:</b> {tf}\n"
-                        f"📊 <b>Signal:</b> {signal['type']}\n"
-                        f"📌 <b>Setup:</b> {signal['trend_note']}\n\n"
-                        f"🎯 <b>Entry:</b> {signal['entry']:.4f}\n"
-                        f"🛑 <b>Stop Loss:</b> {signal['stop_loss']:.4f}\n"
-                        f"✅ <b>Target 1 (1:1.5):</b> {signal['target_1']:.4f}\n"
-                        f"✅ <b>Target 2 (1:2):</b> {signal['target_2']:.4f}\n"
-                        f"🏆 <b>Target 3 (1:3):</b> {signal['target_3']:.4f}\n\n"
-                        f"📈 <b>9 EMA:</b> {signal['ema9']:.4f} | <b>20 EMA:</b> {signal['ema20']:.4f}\n"
-                        f"⚠️ <i>{signal['exit_rule']}</i>"
-                    )
-
-                    send_telegram_alert(msg)
-                    state[key] = signal["id"]
-                    state_changed = True
-
-            except Exception as e:
-                print(f"Error processing {symbol} ({tf}): {e}")
-
-    if state_changed:
-        save_state(state)
+def run_once() -> None:
+    exchange = create_exchange()
+    for symbol in SYMBOLS:
+        try:
+            df = fetch_ohlcv_df(exchange, symbol, TIMEFRAME, limit=120)
+            setup = analyze_9_20_ema_strategy(df)
+            if setup:
+                send_telegram_alert(format_alert(symbol, setup))
+            else:
+                print(f"[{symbol}] No 9/20 EMA setup.")
+        except Exception as e:
+            print(f"[{symbol}] Error: {e}")
 
 
 if __name__ == "__main__":
-    main()
+    run_once()
