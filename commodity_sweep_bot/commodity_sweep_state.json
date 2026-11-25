@@ -1,9 +1,9 @@
 {
-  "date": "2026-11-24",
+  "date": "2026-11-25",
   "trades_today": 0,
   "losses_today": 0,
   "last_alert_ts": {},
   "last_candle_ts": {},
   "stand_down_sent": false,
-  "last_caution_note": "IST 20:55 (संवेदनशील डेटा/सत्र विंडो)"
+  "last_caution_note": ""
 }
