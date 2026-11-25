@@ -27,9 +27,9 @@ class MultiCommodityDisciplineConfig:
     max_total_daily_losses: int = 2
     cooldown_minutes: int = 60
     sensitive_ist_hours: tuple[int, ...] = (18, 19, 20)
-    block_in_sensitive_hours: bool = True
+    block_in_sensitive_hours: bool = False
     state_file: str = "commodity_sweep_bot/commodity_sweep_state.json"
-    send_startup_test_alert: bool = True  # जांच के बाद इसे False कर दें
+    send_startup_test_alert: bool = False  # जांच के बाद इसे False कर दें
     rules: dict[str, AssetRule] = field(default_factory=lambda: {
         "GOLD": AssetRule(
             ticker="GC=F",
