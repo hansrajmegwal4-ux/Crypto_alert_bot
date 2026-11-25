@@ -15,7 +15,7 @@ class AssetRule:
     sl_buffer_pct: float
     risk_pct: float
     rr_target: float = 3.0
-    timeframe_label: str = "4H Range → 15M Setup"
+    timeframe_label: str = "4H Range -> 15M Setup"
     precaution_note: str = ""
 
 
@@ -29,39 +29,40 @@ class MultiCommodityDisciplineConfig:
     sensitive_ist_hours: tuple[int, ...] = (18, 19, 20)
     block_in_sensitive_hours: bool = True
     state_file: str = "commodity_sweep_bot/commodity_sweep_state.json"
+    send_startup_test_alert: bool = True  # जांच के बाद इसे False कर दें
     rules: dict[str, AssetRule] = field(default_factory=lambda: {
         "GOLD": AssetRule(
             ticker="GC=F",
             lookback=15,
             min_rejection_ratio=0.45,
-            max_candle_range_pct=1.8,
+            max_candle_range_pct=1.0,
             sl_buffer_pct=0.0012,
             risk_pct=1.5,
             rr_target=3.0,
-            timeframe_label="4H Range → 15M Setup",
-            precaution_note="डेटा/सत्र के समय अचानक स्पाइक से बचें; SL को पीछे न खिसकाएं।",
+            timeframe_label="4H Range -> 15M Setup",
+            precaution_note="डेटा/सत्र के समय अचानक स्पाइक से बचें, SL को पीछे न खिसकाएं।",
         ),
         "SILVER": AssetRule(
             ticker="SI=F",
             lookback=18,
-            min_rejection_ratio=0.58,
+            min_rejection_ratio=0.50,
             max_candle_range_pct=2.5,
             sl_buffer_pct=0.0020,
             risk_pct=1.0,
             rr_target=2.5,
-            timeframe_label="4H Range → 15M Setup",
-            precaution_note="सिल्वर में फ़ेक स्वीप और दोनों तरफ़ के झटके आम हैं; कम जोखिम व सख़्त SL रखें।",
+            timeframe_label="4H Range -> 15M Setup",
+            precaution_note="सिल्वर में फ़ेक ब्रेक और दोनों तरफ़ के झटके आम हैं; कम जोखिम व सख़्त SL रखें।",
         ),
         "OIL": AssetRule(
             ticker="CL=F",
-            lookback=15,
-            min_rejection_ratio=0.48,
+            lookback=16,
+            min_rejection_ratio=0.40,
             max_candle_range_pct=2.2,
             sl_buffer_pct=0.0018,
             risk_pct=1.25,
             rr_target=3.0,
-            timeframe_label="4H Range → 15M Setup",
-            precaution_note="इन्वेंटरी/डेटा और शाम के सत्र की अस्थिरता में बिना कन्फर्मेशन न कूदें।",
+            timeframe_label="4H Range -> 15M Setup",
+            precaution_note="इन्वेंट्री/डेटा और शाम के सत्र की अस्थिरता में बिना कन्फ़र्मेशन न कूदें।",
         ),
     })
 
@@ -85,7 +86,7 @@ def fetch_yahoo_candles(ticker: str, interval: str = "15m", range_span: str = "5
 
         item = result[0]
         timestamps = item.get("timestamp") or []
-        quote_list = item.get("indicators", {}).get("quote") or []
+        quote_list = item.get("indicators", {}).get("quote", []) or []
         if not timestamps or not quote_list:
             return []
 
@@ -115,7 +116,7 @@ def fetch_yahoo_candles(ticker: str, interval: str = "15m", range_span: str = "5
             })
         return candles
     except Exception as exc:
-        print(f"[ERROR] {ticker} कैंडल डेटा लाने में समस्या: {exc}")
+        print(f"[ERROR] ({ticker}) कैंडल डेटा लाने में समस्या: {exc}", flush=True)
         return []
 
 
@@ -162,22 +163,25 @@ def evaluate_commodity_sweep(candles: list[dict], rule: AssetRule) -> tuple[dict
                 return None, None
             target_1 = entry - (risk_per_unit * 2.0)
             target_2 = entry - (risk_per_unit * rule.rr_target)
-            return {
-                "side": "SHORT",
-                "range_low": round(swing_low, 4),
-                "range_high": round(swing_high, 4),
-                "entry": round(entry, 4),
-                "sl": round(sl, 4),
-                "target_1": round(target_1, 4),
-                "target_2": round(target_2, 4),
-                "risk_per_unit": risk_per_unit,
-                "risk_pct": rule.risk_pct,
-                "rr_target": rule.rr_target,
-                "rejection_pct": round(rej_ratio * 100, 1),
-                "range_pct": round(range_pct, 2),
-                "timeframe_label": rule.timeframe_label,
-                "precaution_note": rule.precaution_note,
-            }, None
+            return (
+                {
+                    "side": "SHORT",
+                    "range_low": round(swing_low, 4),
+                    "range_high": round(swing_high, 4),
+                    "entry": round(entry, 4),
+                    "sl": round(sl, 4),
+                    "target_1": round(target_1, 4),
+                    "target_2": round(target_2, 4),
+                    "risk_per_unit": risk_per_unit,
+                    "risk_pct": rule.risk_pct,
+                    "rr_target": rule.rr_target,
+                    "rejection_pct": round(rej_ratio * 100, 1),
+                    "range_pct": round(range_pct, 2),
+                    "timeframe_label": rule.timeframe_label,
+                    "precaution_note": rule.precaution_note,
+                },
+                None,
+            )
 
     # Bullish Sweep + Rejection
     if last["low"] < swing_low and last["close"] > swing_low:
@@ -190,22 +194,25 @@ def evaluate_commodity_sweep(candles: list[dict], rule: AssetRule) -> tuple[dict
                 return None, None
             target_1 = entry + (risk_per_unit * 2.0)
             target_2 = entry + (risk_per_unit * rule.rr_target)
-            return {
-                "side": "LONG",
-                "range_low": round(swing_low, 4),
-                "range_high": round(swing_high, 4),
-                "entry": round(entry, 4),
-                "sl": round(sl, 4),
-                "target_1": round(target_1, 4),
-                "target_2": round(target_2, 4),
-                "risk_per_unit": risk_per_unit,
-                "risk_pct": rule.risk_pct,
-                "rr_target": rule.rr_target,
-                "rejection_pct": round(rej_ratio * 100, 1),
-                "range_pct": round(range_pct, 2),
-                "timeframe_label": rule.timeframe_label,
-                "precaution_note": rule.precaution_note,
-            }, None
+            return (
+                {
+                    "side": "LONG",
+                    "range_low": round(swing_low, 4),
+                    "range_high": round(swing_high, 4),
+                    "entry": round(entry, 4),
+                    "sl": round(sl, 4),
+                    "target_1": round(target_1, 4),
+                    "target_2": round(target_2, 4),
+                    "risk_per_unit": risk_per_unit,
+                    "risk_pct": rule.risk_pct,
+                    "rr_target": rule.rr_target,
+                    "rejection_pct": round(rej_ratio * 100, 1),
+                    "range_pct": round(range_pct, 2),
+                    "timeframe_label": rule.timeframe_label,
+                    "precaution_note": rule.precaution_note,
+                },
+                None,
+            )
 
     return None, None
 
@@ -230,6 +237,7 @@ def load_state(path: str) -> dict:
         if data.get("date") != today:
             return default
         data.setdefault("last_candle_ts", {})
+        data.setdefault("last_alert_ts", {})
         return data
     except Exception:
         return default
@@ -245,15 +253,16 @@ def send_telegram(text: str) -> None:
     token = (
         os.getenv("TELEGRAM_BOT_TOKEN")
         or os.getenv("TELEGRAM_TOKEN")
-        or "8965031504:AAEtQ47KSQ2Oq4uHgdxcvdtPBRnTuheyrx8"
+        or "8465031504:AAE1Q47KSQ2bgXwMgdxcvdtPBRnTuheyrs8"
     ).strip()
     chat_id = (
         os.getenv("TELEGRAM_CHAT_ID")
-        or "6292189819"
+        or "6292180619"
     ).strip()
 
     if not token or not chat_id:
-        print(text)
+        print("[WARN] Telegram token या chat_id नहीं मिला।", flush=True)
+        print(text, flush=True)
         return
     try:
         r = requests.post(
@@ -262,8 +271,9 @@ def send_telegram(text: str) -> None:
             timeout=15,
         )
         r.raise_for_status()
+        print("[INFO] Telegram मैसेज सफलतापूर्वक भेजा गया।", flush=True)
     except Exception as exc:
-        print(f"[ERROR] Telegram alert failed: {exc}")
+        print(f"[ERROR] Telegram alert failed: {exc}", flush=True)
 
 
 def build_alert_message(
@@ -285,144 +295,63 @@ def build_alert_message(
     )
 
     return (
-        f"<b>🔱 हंसराज मेघवाल 🔱</b>\n"
-        f"<b>🚨 LIQUIDITY SWEEP ALERT 🚨</b>\n\n"
+        f"<b>🧭 हंसराज मेघवाल</b>\n"
+        f"<b>🚨 LIQUIDITY SWEEP ALERT 🚨</b>\n"
         f"<b>🪙 Asset:</b> {symbol}\n"
-        f"<b>⏱️ Timeframe:</b> {setup['timeframe_label']}\n"
+        f"<b>⏱ Timeframe:</b> {setup['timeframe_label']}\n"
         f"<b>🎯 Direction:</b> {direction_text}\n"
-        f"<b>📅 LTF Candle:</b> {candle_time}\n\n"
-        f"<b>📐 Range:</b>\n"
+        f"<b>🕒 LTF Candle:</b> {candle_time}\n"
+        f"<b>📊 Range:</b>\n"
         f"• Low: <code>{setup['range_low']}</code>\n"
-        f"• High: <code>{setup['range_high']}</code>\n\n"
-        f"<b>⚡ Entry Price:</b> <code>{setup['entry']}</code>\n"
-        f"<b>🛑 Stop Loss:</b> <code>{setup['sl']}</code> ({sl_label})\n\n"
-        f"<b>💰 Take Profit Targets:</b>\n"
-        f"🎯 Target 1 (1:2): <code>{setup['target_1']}</code>\n"
-        f"🚀 Target 2 (1:3): <code>{setup['target_2']}</code>\n\n"
-        f"<b>🔒 Risk/Reward:</b> 1:{setup['rr_target']}\n"
-        f"<b>⚖️ Risk &amp; Discipline:</b> ₹{sizing['max_loss_inr']} ({setup['risk_pct']}%) | Margin (~{cfg.leverage}x): ₹{sizing['margin_inr']}\n"
-        f"<b>📊 Daily Quota:</b> Trades {state['trades_today']}/{cfg.max_total_daily_trades} | Losses {state['losses_today']}/{cfg.max_total_daily_losses}\n"
-        f"<b>🛡️ Caution:</b> {setup['precaution_note']}"
+        f"• High: <code>{setup['range_high']}</code>\n"
+        f"<b>🎯 Entry Price:</b> <code>{setup['entry']}</code>\n"
+        f"<b>🛑 Stop Loss:</b> <code>{setup['sl']}</code> ({sl_label})\n"
+        f"<b>🎯 Take Profit Targets:</b>\n"
+        f"• Target 1 (1:2): <code>{setup['target_1']}</code>\n"
+        f"• Target 2 (1:{setup['rr_target']}): <code>{setup['target_2']}</code>\n"
+        f"<b>📈 Risk/Reward:</b> 1:{setup['rr_target']}\n"
+        f"<b>🛡 Risk &amp; Discipline:</b> ₹{sizing['max_loss_inr']} ({setup['risk_pct']}%) | Margin ~₹{sizing['margin_inr']} ({cfg.leverage}x)\n"
+        f"<b>📌 Daily Quota:</b> Trades {state['trades_today']}/{cfg.max_total_daily_trades} | Losses {state['losses_today']}/{cfg.max_total_daily_losses}\n"
+        f"<b>⚠️ Caution:</b> {setup['precaution_note']}"
     )
-
-
-def simulate_trade_outcome(
-    candles: list[dict],
-    entry_idx: int,
-    setup: dict,
-    max_forward_candles: int = 40,
-) -> str:
-    side = setup["side"]
-    sl = setup["sl"]
-    target_2 = setup["target_2"]
-    end_idx = min(len(candles) - 1, entry_idx + max_forward_candles)
-
-    for idx in range(entry_idx + 1, end_idx + 1):
-        c = candles[idx]
-        if side == "SHORT":
-            if c["high"] >= sl:
-                return "LOSS"
-            if c["low"] <= target_2:
-                return "WIN"
-        else:
-            if c["low"] <= sl:
-                return "LOSS"
-            if c["high"] >= target_2:
-                return "WIN"
-
-    return "OPEN"
-
-
-def backtest_symbol(
-    symbol: str,
-    candles: list[dict],
-    rule: AssetRule,
-    max_forward_candles: int = 40,
-) -> dict:
-    wins = 0
-    losses = 0
-    open_trades = 0
-    skipped_spikes = 0
-
-    if len(candles) < rule.lookback + 10:
-        return {
-            "symbol": symbol,
-            "total_closed": 0,
-            "wins": 0,
-            "losses": 0,
-            "open": 0,
-            "skipped_spikes": 0,
-            "win_rate_pct": 0.0,
-        }
-
-    for i in range(rule.lookback + 5, len(candles) - 1):
-        slice_candles = candles[: i + 1]
-        setup, skip_reason = evaluate_commodity_sweep(slice_candles, rule)
-        if skip_reason:
-            skipped_spikes += 1
-            continue
-        if not setup:
-            continue
-
-        outcome = simulate_trade_outcome(candles, i, setup, max_forward_candles)
-        if outcome == "WIN":
-            wins += 1
-        elif outcome == "LOSS":
-            losses += 1
-        else:
-            open_trades += 1
-
-    closed = wins + losses
-    win_rate = (wins / closed * 100.0) if closed > 0 else 0.0
-    return {
-        "symbol": symbol,
-        "total_closed": closed,
-        "wins": wins,
-        "losses": losses,
-        "open": open_trades,
-        "skipped_spikes": skipped_spikes,
-        "win_rate_pct": round(win_rate, 2),
-    }
-
-
-def run_backtest_report(cfg: MultiCommodityDisciplineConfig | None = None) -> None:
-    cfg = cfg or MultiCommodityDisciplineConfig()
-    print("=== COMMODITY LIQUIDITY SWEEP BACKTEST REPORT ===")
-    for symbol in ("GOLD", "SILVER", "OIL"):
-        rule = cfg.rules.get(symbol)
-        if not rule:
-            continue
-        candles = fetch_yahoo_candles(rule.ticker, interval="15m", range_span="5d")
-        res = backtest_symbol(symbol, candles, rule)
-        print(
-            f"{res['symbol']}: Closed={res['total_closed']} "
-            f"(Wins={res['wins']}, Losses={res['losses']}, Open={res['open']}) | "
-            f"Win Rate={res['win_rate_pct']}% | Skipped Spikes={res['skipped_spikes']}"
-        )
 
 
 def run_multi_commodity_bot(cfg: MultiCommodityDisciplineConfig | None = None) -> None:
     cfg = cfg or MultiCommodityDisciplineConfig()
     state = load_state(cfg.state_file)
+    ist_now = datetime.now(timezone(timedelta(hours=5, minutes=30))).strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[START] Commodity bot run at IST {ist_now} | state={state}", flush=True)
+
+    if cfg.send_startup_test_alert and not state.get("startup_test_sent"):
+        send_telegram(
+            f"<b>🧭 हंसराज मेघवाल</b>\n"
+            f"✅ <b>Commodity Bot Test Alert</b>\n"
+            f"समय (IST): <code>{ist_now}</code>\n"
+            f"यह टेस्ट मैसेज Telegram कनेक्शन और GitHub Actions रन की पुष्टि के लिए भेजा गया है।"
+        )
+        state["startup_test_sent"] = True
+        save_state(cfg.state_file, state)
 
     if state["losses_today"] >= cfg.max_total_daily_losses or state["trades_today"] >= cfg.max_total_daily_trades:
+        print("[INFO] डेली ट्रेड या लॉस सीमा पूरी हो चुकी है।", flush=True)
         if not state.get("stand_down_sent"):
             send_telegram(
                 "<b>🛑 STAND DOWN (GOLD / SILVER / OIL)</b>\n"
-                f"आज की साझा सीमा पूरी हो गई है (ट्रेड्स: {state['trades_today']}/{cfg.max_total_daily_trades}, "
-                f"लॉस: {state['losses_today']}/{cfg.max_total_daily_losses})।\n"
-                "सावधानी: बदले या रिकवरी की भावना से ट्रेड न लें—आज के लिए रुकें।"
+                f"• आज की संख्या सीमा पूरी हो गई है (Trades: {state['trades_today']}/{cfg.max_total_daily_trades}, "
+                f"Losses: {state['losses_today']}/{cfg.max_total_daily_losses})\n"
+                "• सावधानी: बदले या शिकारी की भावना से ट्रेड न लें—आज के लिए रुकें।"
             )
             state["stand_down_sent"] = True
             save_state(cfg.state_file, state)
         return
 
     in_sensitive_window, window_label = is_sensitive_market_window_ist(cfg)
+    print(f"[WINDOW] {window_label} | block_in_sensitive_hours={cfg.block_in_sensitive_hours}", flush=True)
     if in_sensitive_window and cfg.block_in_sensitive_hours:
         caution_msg = (
-            f"<b>⚠️ सावधानी गार्ड सक्रिय ({window_label})</b>\n"
-            "संवेदनशील डेटा/सत्र विंडो के दौरान अचानक बड़े स्पाइक्स और फ़ेक स्वीप का जोखिम अधिक रहता है। "
-            "इसलिए इस दौरान स्वचालित एंट्री अलर्ट रोके गए हैं—धैर्य रखें और शांत स्थिति की प्रतीक्षा करें।"
+            f"<b>⚠️ सावधानी गई मंज़िल ({window_label})</b>\n"
+            "• संवेदनशील डेटा/सत्र विंडो के दौरान अचानक वोलैटिलिटी और फ़ेक स्वीप का जोखिम अधिक रहता है।\n"
+            "• इसलिए इस दौरान स्वचालित एंट्री अलर्ट रोके गए हैं—धैर्य रखें और स्पष्ट स्थिति की प्रतीक्षा करें।"
         )
         if state.get("last_caution_note") != window_label:
             send_telegram(caution_msg)
@@ -438,22 +367,27 @@ def run_multi_commodity_bot(cfg: MultiCommodityDisciplineConfig | None = None) -
         if not rule:
             continue
         if now_ts - state["last_alert_ts"].get(symbol, 0) < cooldown_sec:
+            print(f"[SKIP - {symbol}] कूलडाउन सक्रिय है।", flush=True)
             continue
 
         candles = fetch_yahoo_candles(rule.ticker, interval="15m", range_span="5d")
         if not candles:
+            print(f"[SKIP - {symbol}] कोई कैंडल डेटा नहीं मिला।", flush=True)
             continue
 
         latest_candle_ts = candles[-1]["ts"]
         if state["last_candle_ts"].get(symbol) == latest_candle_ts:
+            print(f"[SKIP - {symbol}] कैंडल टाइमस्टैम्प ({latest_candle_ts}) पहले ही जांचा जा चुका है।", flush=True)
             continue
 
         setup, skip_reason = evaluate_commodity_sweep(candles, rule)
         if skip_reason:
-            print(f"[CAUTION - {symbol}] {skip_reason}")
+            print(f"[CAUTION - {symbol}] {skip_reason}", flush=True)
             state["last_candle_ts"][symbol] = latest_candle_ts
             continue
+
         if not setup:
+            print(f"[NO_SETUP - {symbol}] latest_ts={latest_candle_ts}, close={candles[-1]['close']}", flush=True)
             continue
 
         max_loss_inr = cfg.capital_inr * (setup["risk_pct"] / 100.0)
@@ -476,6 +410,7 @@ def run_multi_commodity_bot(cfg: MultiCommodityDisciplineConfig | None = None) -
             break
 
     save_state(cfg.state_file, state)
+    print("[DONE] रन पूरा हुआ।", flush=True)
 
 
 if __name__ == "__main__":
