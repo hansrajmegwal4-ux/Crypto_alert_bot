@@ -253,12 +253,12 @@ def send_telegram(text: str) -> None:
     token = (
         os.getenv("TELEGRAM_BOT_TOKEN")
         or os.getenv("TELEGRAM_TOKEN")
-        or "8963851584:AAHDD47K5Q20qAURgsBloMQhBwMfUhdyrxM"
-    ).strip()
+    ).strip() if (os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN")) else ""
     chat_id = (
         os.getenv("TELEGRAM_CHAT_ID")
-        or "6292189019"
+        or ""
     ).strip()
+
 
     if not token or not chat_id:
         print("[WARN] Telegram token या chat_id नहीं मिला।", flush=True)
