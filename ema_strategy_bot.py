@@ -213,7 +213,7 @@ def analyze_9_20_ema_strategy(df: pd.DataFrame) -> dict | None:
 def format_alert(symbol: str, setup: dict) -> str:
     return (        f"<b>🔱🏛️ हंसराज मेघवाल 🏛️🔱</b>\n"
 
-        f"🚨 <b>सफल सिग्नल</b> 🚨\n"
+                      f"🚨 <b>सफल सिग्नल</b> 🚨\n"
         f"📊 <b>9/20 EMA TRADING ALERT</b> 📊\n\n"
         f"🪙 <b>Coin Pair:</b> <code>{symbol}</code>\n"
         f"⏱️ <b>Timeframe:</b> <code>{TIMEFRAME.upper()}</code>\n"
