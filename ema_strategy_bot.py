@@ -25,7 +25,7 @@ SYMBOLS = [
     "BNB/USDT",
     "XRP/USDT",
 ]
-TIMEFRAME = "15m"        # विकल्प: "15m", "30m", "1h", "4h"
+TIMEFRAME = "1h"        # विकल्प: "15m", "30m", "1h", "4h"
 FAST_EMA = 9             # शॉर्ट-टर्म EMA
 SLOW_EMA = 20            # मीड-टर्म EMA
 REWARD_RATIO = 3.0       # टारगेट रिस्क-रेशियो (1:3)
