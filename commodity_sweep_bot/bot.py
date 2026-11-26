@@ -15,7 +15,7 @@ class AssetRule:
     sl_buffer_pct: float
     risk_pct: float
     rr_target: float = 3.0
-    timeframe_label: str = "4H Range -> 15M Setup"
+    timeframe_label: str = "4H Range -> 1h Setup"
     precaution_note: str = ""
 
 
@@ -39,7 +39,7 @@ class MultiCommodityDisciplineConfig:
             sl_buffer_pct=0.0012,
             risk_pct=1.5,
             rr_target=3.0,
-            timeframe_label="4H Range -> 15M Setup",
+            timeframe_label="4H Range -> 1h Setup",
             precaution_note="डेटा/सत्र के समय अचानक बाउंस से बचें, SL को पीछे न खिसकाएँ।",
         ),
         "SILVER": AssetRule(
@@ -50,7 +50,7 @@ class MultiCommodityDisciplineConfig:
             sl_buffer_pct=0.0020,
             risk_pct=1.0,
             rr_target=2.5,
-            timeframe_label="4H Range -> 15M Setup",
+            timeframe_label="4H Range -> 1h Setup",
             precaution_note="सिल्वर में फेक ब्रेक और दोनों तरफ के झटके आम हैं; कम जोखिम व सख्त SL रखें।",
         ),
         "OIL": AssetRule(
@@ -61,13 +61,13 @@ class MultiCommodityDisciplineConfig:
             sl_buffer_pct=0.0018,
             risk_pct=1.25,
             rr_target=3.0,
-            timeframe_label="4H Range -> 15M Setup",
+            timeframe_label="4H Range -> 1h Setup",
             precaution_note="इन्वेंट्री/डेटा और शाम के सत्र की अस्थिरता में बिना कन्फ़र्मेशन न कूदें।",
         ),
     })
 
 
-def fetch_yahoo_candles(ticker: str, interval: str = "15m", range_span: str = "5d") -> list[dict]:
+def fetch_yahoo_candles(ticker: str, interval: str = "1h", range_span: str = "5d") -> list[dict]:
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
     headers = {"User-Agent": "Mozilla/5.0"}
 
