@@ -24,28 +24,31 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Test Telegram Ping
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          curl -s -X POST "https://api.telegram.org/bot8963051504:AAHED47K5Q2DqAURgSbIoMQNbWRTUhdyrxN/sendMessage" \
-            -d chat_id="6252109019" \
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d chat_id="${TELEGRAM_CHAT_ID}" \
             -d text="हंसराज मेघवाल: Test ping — run_bot.yml delivery OK"
 
       - name: Run EMA Bot
         env:
-          TELEGRAM_BOT_TOKEN: "8963051504:AAHED47K5Q2DqAURgSbIoMQNbWRTUhdyrxN"
-          TELEGRAM_CHAT_ID: "6252109019"
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python ema_strategy_bot.py
 
       - name: Run Sweep Bot V2
         env:
-          TELEGRAM_BOT_TOKEN: "8963051504:AAHED47K5Q2DqAURgSbIoMQNbWRTUhdyrxN"
-          TELEGRAM_CHAT_ID: "6252109019"
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           PYTHONWARNINGS: ignore::FutureWarning
         run: python sweep_bot_v2.py
 
       - name: Run Commodity Sweep Bot
         env:
-          TELEGRAM_BOT_TOKEN: "8963051504:AAHED47K5Q2DqAURgSbIoMQNbWRTUhdyrxN"
-          TELEGRAM_CHAT_ID: "6252109019"
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python commodity_sweep_bot/bot.py
 
       - name: Stop repeat notifications
