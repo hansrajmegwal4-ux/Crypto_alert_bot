@@ -18,7 +18,7 @@ TELEGRAM_CHAT_ID = os.getenv(
     os.getenv("TELEGRAM_CHAT_ID")
 )
 
-EXCHANGE_ID = "kucoin"
+EXCHANGE_ID = "binance"
 SYMBOLS = [
     "BTC/USDT",
     "ETH/USDT",
