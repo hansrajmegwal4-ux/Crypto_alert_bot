@@ -23,23 +23,29 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Test Telegram Ping
+        run: |
+          curl -s -X POST "https://api.telegram.org/bot8963051504:AAHED47K5Q2DqAURgSbIoMQNbWRTUhdyrxN/sendMessage" \
+            -d chat_id="6252109019" \
+            -d text="हंसराज मेघवाल: Test ping — run_bot.yml delivery OK"
+
       - name: Run EMA Bot
         env:
-          TELEGRAM_BOT_TOKEN: "8963851584:AAHDD47K5Q20qAURgsBloMQhBwMfUhdyrxM"
-          TELEGRAM_CHAT_ID: "6292189019"
+          TELEGRAM_BOT_TOKEN: "8963051504:AAHED47K5Q2DqAURgSbIoMQNbWRTUhdyrxN"
+          TELEGRAM_CHAT_ID: "6252109019"
         run: python ema_strategy_bot.py
 
       - name: Run Sweep Bot V2
         env:
-          TELEGRAM_BOT_TOKEN: "8963851584:AAHDD47K5Q20qAURgsBloMQhBwMfUhdyrxM"
-          TELEGRAM_CHAT_ID: "6292189019"
+          TELEGRAM_BOT_TOKEN: "8963051504:AAHED47K5Q2DqAURgSbIoMQNbWRTUhdyrxN"
+          TELEGRAM_CHAT_ID: "6252109019"
           PYTHONWARNINGS: ignore::FutureWarning
         run: python sweep_bot_v2.py
 
       - name: Run Commodity Sweep Bot
         env:
-          TELEGRAM_BOT_TOKEN: "8963851584:AAHDD47K5Q20qAURgsBloMQhBwMfUhdyrxM"
-          TELEGRAM_CHAT_ID: "6292189019"
+          TELEGRAM_BOT_TOKEN: "8963051504:AAHED47K5Q2DqAURgSbIoMQNbWRTUhdyrxN"
+          TELEGRAM_CHAT_ID: "6252109019"
         run: python commodity_sweep_bot/bot.py
 
       - name: Stop repeat notifications
