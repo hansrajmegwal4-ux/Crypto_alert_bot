@@ -15,7 +15,7 @@ TELEGRAM_CHAT_ID = (
 )
 
 
-EXCHANGE_ID = "binance"
+EXCHANGE_ID = "kucoin"
 SYMBOLS = [
     "BTC/USDT",
     "ETH/USDT",
