@@ -8,13 +8,12 @@ import ccxt
 TELEGRAM_BOT_TOKEN = (
     os.getenv("TELEGRAM_BOT_TOKEN")
     or os.getenv("TELEGRAM_BOT_TOKEN_SWEEP")
-    or "8963851584:AAHDD47K5Q20qAURgsBloMQhBwMfUhdyrxM"
 )
 TELEGRAM_CHAT_ID = (
     os.getenv("TELEGRAM_CHAT_ID")
     or os.getenv("TELEGRAM_CHAT_ID_SWEEP")
-    or "6292189019"
 )
+
 
 EXCHANGE_ID = "kucoin"
 SYMBOLS = [
