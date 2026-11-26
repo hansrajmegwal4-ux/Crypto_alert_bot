@@ -11,11 +11,11 @@ import ccxt
 # ==========================================
 TELEGRAM_BOT_TOKEN = os.getenv(
     "TELEGRAM_BOT_TOKEN",
-   "8963851584:AAHDD47K5Q20qAURgsBloMQhBwMfUhdyrxM",
+   os.getenv("TELEGRAM_BOT_TOKEN")
 )
 TELEGRAM_CHAT_ID = os.getenv(
     "TELEGRAM_CHAT_ID",
-    "6292189019",
+    os.getenv("TELEGRAM_CHAT_ID")
 )
 
 EXCHANGE_ID = "kucoin"
