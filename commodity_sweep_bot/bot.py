@@ -4,7 +4,6 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 import requests
-import ccxt
 
 
 @dataclass
@@ -33,7 +32,7 @@ class MultiCommodityDisciplineConfig:
     send_startup_test_alert: bool = False
     rules: dict[str, AssetRule] = field(default_factory=lambda: {
         "GOLD": AssetRule(
-            ticker="PAXG/USDT",
+            ticker="GC=F",
             lookback=15,
             min_rejection_ratio=0.45,
             max_candle_range_pct=1.0,
@@ -44,7 +43,7 @@ class MultiCommodityDisciplineConfig:
             precaution_note="डेटा/सत्र के समय अचानक बाउंस से बचें, SL को पीछे न खिसकाएँ।",
         ),
         "SILVER": AssetRule(
-            ticker="XAG/USDT",
+            ticker="SI=F",
             lookback=18,
             min_rejection_ratio=0.50,
             max_candle_range_pct=2.5,
@@ -55,7 +54,7 @@ class MultiCommodityDisciplineConfig:
             precaution_note="सिल्वर में फेक ब्रेक और दोनों तरफ के झटके आम हैं; कम जोखिम व सख्त SL रखें।",
         ),
         "OIL": AssetRule(
-            ticker="USOIL/USDT",
+            ticker="CL=F",
             lookback=16,
             min_rejection_ratio=0.40,
             max_candle_range_pct=2.2,
@@ -69,18 +68,46 @@ class MultiCommodityDisciplineConfig:
 
 
 def fetch_yahoo_candles(ticker: str, interval: str = "15m", range_span: str = "5d") -> list[dict]:
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
+    headers = {"User-Agent": "Mozilla/5.0"}
+
     try:
-        exchange = ccxt.binance({"enableRateLimit": True})
-        ohlcv = exchange.fetch_ohlcv(ticker, timeframe=interval, limit=200)
+        resp = requests.get(
+            url,
+            params={"interval": interval, "range": range_span},
+            headers=headers,
+            timeout=15,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+        result = payload.get("chart", {}).get("result", [])
+        if not result:
+            return []
+
+        item = result[0]
+        timestamps = item.get("timestamp") or []
+        quote_list = item.get("indicators", {}).get("quote", []) or []
+        if not timestamps or not quote_list:
+            return []
+
+        q = quote_list[0]
+        opens = q.get("open") or []
+        highs = q.get("high") or []
+        lows = q.get("low") or []
+        closes = q.get("close") or []
+        volumes = q.get("volume") or []
+
         candles: list[dict] = []
-        for row in ohlcv:
-            if not row or len(row) < 6:
-                continue
-            ts_ms, o, h, l, c, v = row[:6]
-            if None in (ts_ms, o, h, l, c):
+        for idx, ts in enumerate(timestamps):
+            o = opens[idx] if idx < len(opens) else None
+            h = highs[idx] if idx < len(highs) else None
+            l = lows[idx] if idx < len(lows) else None
+            c = closes[idx] if idx < len(closes) else None
+            v = volumes[idx] if idx < len(volumes) else 0
+            if None in (o, h, l, c):
                 continue
             candles.append({
-                "ts": int(ts_ms // 1000),
+                "ts": int(ts),
                 "open": float(o),
                 "high": float(h),
                 "low": float(l),
