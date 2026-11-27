@@ -106,10 +106,16 @@ def send_telegram_alert(message: str) -> bool:
         return False
 
 
-# ================= DATA & INDICATORS =================
-def fetch_ohlcv_df(symbol: str, timeframe: str = "1h", limit: int = 120) -> pd.DataFrame:
-    clean_symbol = symbol.replace("/", "").replace("-", "").replace(":USDT", "").upper()
-    url = "https://api.binance.com/api/v3/klines"
+# ================= DATA FETCH (WITH 451 FALLBACKS) =================
+def _normalize_symbol(symbol: str) -> str:
+    clean = symbol.replace("/", "").replace("-", "").replace(":USDT", "").upper()
+    if clean == "RNDRUSDT":
+        return "RENDERUSDT"
+    return clean
+
+
+def _fetch_binance_vision(clean_symbol: str, timeframe: str, limit: int) -> pd.DataFrame:
+    url = "https://data-api.binance.vision/api/v3/klines"
     params = {"symbol": clean_symbol, "interval": timeframe, "limit": limit}
     resp = requests.get(url, params=params, timeout=15)
     resp.raise_for_status()
@@ -126,9 +132,67 @@ def fetch_ohlcv_df(symbol: str, timeframe: str = "1h", limit: int = 120) -> pd.D
     for col in ["open", "high", "low", "close", "volume"]:
         df[col] = df[col].astype(float)
     df["timestamp"] = pd.to_datetime(df["open_time"], unit="ms").dt.strftime("%Y-%m-%d %H:%M:%S")
-    return df
+    return df[["open_time", "open", "high", "low", "close", "volume", "timestamp"]]
 
 
+def _fetch_kucoin(clean_symbol: str, timeframe: str, limit: int) -> pd.DataFrame:
+    base = clean_symbol[:-4] if clean_symbol.endswith("USDT") else clean_symbol
+    kucoin_symbol = f"{base}-USDT"
+    tf_map = {"15m": "15min", "30m": "30min", "1h": "1hour", "4h": "4hour"}
+    k_type = tf_map.get(timeframe, "1hour")
+
+    url = "https://api.kucoin.com/api/v1/market/candles"
+    params = {"symbol": kucoin_symbol, "type": k_type}
+    resp = requests.get(url, params=params, timeout=15)
+    resp.raise_for_status()
+    data = resp.json().get("data") or []
+    if not data:
+        raise ValueError(f"Empty KuCoin candles for {kucoin_symbol}")
+
+    rows = list(reversed(data[:limit]))
+    df = pd.DataFrame(rows, columns=["open_time_s", "open", "close", "high", "low", "volume", "turnover"])
+    df["open_time"] = df["open_time_s"].astype(np.int64) * 1000
+    for col in ["open", "high", "low", "close", "volume"]:
+        df[col] = df[col].astype(float)
+    df["timestamp"] = pd.to_datetime(df["open_time"], unit="ms").dt.strftime("%Y-%m-%d %H:%M:%S")
+    return df[["open_time", "open", "high", "low", "close", "volume", "timestamp"]]
+
+
+def _fetch_bybit(clean_symbol: str, timeframe: str, limit: int) -> pd.DataFrame:
+    interval_map = {"15m": "15", "30m": "30", "1h": "60", "4h": "240"}
+    b_interval = interval_map.get(timeframe, "60")
+
+    url = "https://api.bybit.com/v5/market/kline"
+    params = {"category": "spot", "symbol": clean_symbol, "interval": b_interval, "limit": limit}
+    resp = requests.get(url, params=params, timeout=15)
+    resp.raise_for_status()
+    result = (resp.json().get("result") or {}).get("list") or []
+    if not result:
+        raise ValueError(f"Empty Bybit candles for {clean_symbol}")
+
+    rows = list(reversed(result))
+    df = pd.DataFrame(rows, columns=["open_time_ms", "open", "high", "low", "close", "volume", "turnover"])
+    df["open_time"] = df["open_time_ms"].astype(np.int64)
+    for col in ["open", "high", "low", "close", "volume"]:
+        df[col] = df[col].astype(float)
+    df["timestamp"] = pd.to_datetime(df["open_time"], unit="ms").dt.strftime("%Y-%m-%d %H:%M:%S")
+    return df[["open_time", "open", "high", "low", "close", "volume", "timestamp"]]
+
+
+def fetch_ohlcv_df(symbol: str, timeframe: str = "1h", limit: int = 120) -> pd.DataFrame:
+    clean_symbol = _normalize_symbol(symbol)
+    last_err = None
+    for fetcher in (_fetch_binance_vision, _fetch_kucoin, _fetch_bybit):
+        try:
+            df = fetcher(clean_symbol, timeframe, limit)
+            if len(df) >= 25:
+                return df
+        except Exception as e:
+            last_err = e
+    raise RuntimeError(f"All OHLCV sources failed for {clean_symbol}: {last_err}")
+
+
+# ================= INDICATORS =================
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df["ema_9"] = df["close"].ewm(span=FAST_EMA, adjust=False).mean()
@@ -261,7 +325,7 @@ def analyze_strategy(df: pd.DataFrame) -> dict | None:
 
 # ================= FORMATTER & RUNNER =================
 def format_pair_name(symbol: str) -> str:
-    clean = symbol.replace("/", "").replace("-", "").replace(":USDT", "").upper()
+    clean = _normalize_symbol(symbol)
     if clean.endswith("USDT"):
         return f"{clean[:-4]}/USDT"
     return symbol
