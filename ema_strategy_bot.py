@@ -185,7 +185,7 @@ def fetch_ohlcv_df(symbol: str, timeframe: str = "1h", limit: int = 120) -> pd.D
     for fetcher in (_fetch_binance_vision, _fetch_kucoin, _fetch_bybit):
         try:
             df = fetcher(clean_symbol, timeframe, limit)
-            if len(df) >= 25:
+            if len(df) >= 35:
                 return df
         except Exception as e:
             last_err = e
@@ -208,20 +208,19 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     rs = avg_gain / avg_loss.replace(0, np.nan)
     df["rsi"] = 100 - (100 / (1 + rs))
 
-    # Bollinger Bands (20, 2) Squeeze
-    bb_mid = df["close"].rolling(20).mean()
+    # Bollinger Bands (20, 2) & Extreme Squeeze (12th percentile over last 40 candles)
+    df["bb_mid"] = df["close"].rolling(20).mean()
     bb_std = df["close"].rolling(20).std()
-    bb_upper = bb_mid + 2 * bb_std
-    bb_lower = bb_mid - 2 * bb_std
-    bb_width_pct = ((bb_upper - bb_lower) / bb_mid) * 100
-    df["bb_squeezed"] = bb_width_pct <= bb_width_pct.rolling(20).quantile(0.25)
+    df["bb_upper"] = df["bb_mid"] + 2 * bb_std
+    df["bb_lower"] = df["bb_mid"] - 2 * bb_std
+    df["bb_width_pct"] = ((df["bb_upper"] - df["bb_lower"]) / df["bb_mid"].replace(0, np.nan)) * 100
+    df["bb_extreme_squeeze"] = df["bb_width_pct"] <= df["bb_width_pct"].rolling(40).quantile(0.12)
 
-    # Volume Spike & Candle Metrics
+    # Volume Spike & Candle Body Metrics
     df["vol_ma20"] = df["volume"].rolling(20).mean()
-    df["vol_spike"] = df["volume"] >= (1.5 * df["vol_ma20"])
+    df["vol_strong_spike"] = df["volume"] >= (1.8 * df["vol_ma20"])
     df["body"] = (df["close"] - df["open"]).abs()
     df["avg_body"] = df["body"].rolling(14).mean()
-    df["lower_wick"] = df[["open", "close"]].min(axis=1) - df["low"]
 
     return df
 
@@ -247,48 +246,54 @@ def build_trade_levels(entry: float, side: str) -> dict:
     }
 
 
-# ================= COMBINED STRATEGY LOGIC =================
+# ================= EXTREME SQUEEZE + STRICT UP/DOWN LOGIC =================
 def analyze_strategy(df: pd.DataFrame) -> dict | None:
-    if len(df) < max(SLOW_EMA + SWING_LOOKBACK + 5, 30):
+    if len(df) < 45:
         return None
 
     df = add_indicators(df)
 
-    c = df.iloc[-2]                # हाल ही में बंद हुई 1h कैंडल
-    p = df.iloc[-3]                # उससे पिछली 1h कैंडल
-    cons_window = df.iloc[-7:-2]   # पिछली 5 कैंडल्स (4-5 घंटे का कंसोलिडेशन ज़ोन)
-
-    prev_swing_high = float(df["high"].iloc[-12:-2].max())
-    prev_swing_low = float(df["low"].iloc[-12:-3].min())
+    c = df.iloc[-2]                 # हाल ही में बंद हुई 1h कैंडल
+    p = df.iloc[-3]                 # उससे पिछली 1h कैंडल
+    squeeze_window = df.iloc[-7:-2] # पिछली 5 कैंडल्स (4-5 घंटे का स्क्वीज़/कंसोलिडेशन ज़ोन)
 
     ema9_curr = float(c["ema_9"])
     ema20_curr = float(c["ema_20"])
+    bb_mid_curr = float(c["bb_mid"])
+    bb_upper_curr = float(c["bb_upper"])
+    bb_lower_curr = float(c["bb_lower"])
+
+    open_curr = float(c["open"])
     entry = float(c["close"])
+    body_curr = float(c["body"])
+    avg_body_curr = float(c["avg_body"])
+    rsi_curr = float(c["rsi"])
+    rsi_prev = float(p["rsi"])
 
-    # 1. PRE-BREAKDOWN SHORT: 4-5h consolidation/squeeze + close below 20 EMA + RSI < 50 cross
-    max_ema_gap = float(cons_window["ema_spread_pct"].max())
-    range_pct = float(
-        ((cons_window["high"].max() - cons_window["low"].min()) / cons_window["close"].mean()) * 100
+    # 1. बहुत ज़्यादा Bollinger Band Squeeze + EMA कसाव की पुष्टि
+    extreme_squeeze_count = int(squeeze_window["bb_extreme_squeeze"].sum())
+    ema_tightness = float(squeeze_window["ema_spread_pct"].max())
+    has_extreme_squeeze = (extreme_squeeze_count >= 2) and (ema_tightness <= 0.85)
+
+    # वॉल्यूम स्पाइक पुष्टि (कम से कम 1.8x औसत)
+    strong_volume = bool(c["vol_strong_spike"])
+    # स्पष्ट कैंडल बॉडी पुष्टि (औसत बॉडी से कम से कम 1.2x मज़बूत)
+    strong_body = body_curr >= (1.2 * avg_body_curr)
+
+    # 2. UP (LONG) कन्फ़र्मेशन: Squeeze के बाद मज़बूत हरी क्लोज़ + RSI > 55 (या 50 से ऊपर क्रॉस) + वॉल्यूम स्पाइक
+    up_close_confirmed = (
+        (entry > open_curr)
+        and (entry > ema20_curr)
+        and (entry > bb_mid_curr)
+        and (entry >= bb_upper_curr * 0.996 or float(c["high"]) > bb_upper_curr)
     )
-    near_ema_count = int(
-        ((cons_window["close"] - cons_window["ema_20"]).abs() / cons_window["ema_20"] * 100 <= 0.8).sum()
-    )
+    up_rsi_confirmed = (rsi_curr >= 55.0) or ((rsi_prev < 50.0) and (rsi_curr >= 52.0))
 
-    consolidated = (max_ema_gap <= 0.75) and (range_pct <= 2.0) and (near_ema_count >= 4)
-    bb_squeeze_recent = bool(df["bb_squeezed"].iloc[-6:-2].any())
-    swept_high_reject = (float(c["high"]) > prev_swing_high) and (entry < prev_swing_high)
-
-    broke_20ema_down = (float(p["close"]) >= float(p["ema_20"])) and (entry < ema20_curr)
-    rsi_crossed_below_50 = (float(p["rsi"]) >= 50.0) and (float(c["rsi"]) < 50.0)
-    bearish_candle = entry < float(c["open"])
-
-    if broke_20ema_down and rsi_crossed_below_50 and bearish_candle and (
-        consolidated or bb_squeeze_recent or swept_high_reject
-    ):
-        levels = build_trade_levels(entry, "SHORT")
+    if has_extreme_squeeze and up_close_confirmed and up_rsi_confirmed and strong_body and strong_volume:
+        levels = build_trade_levels(entry, "LONG")
         return {
-            "side": "SHORT",
-            "direction_badge": "🔴 SHORT (EMA Breakdown + RSI < 50)",
+            "side": "LONG",
+            "direction_badge": "🟢 LONG (Extreme Squeeze UP Breakout)",
             "candle_time": str(c["timestamp"]),
             "ema_9": ema9_curr,
             "ema_20": ema20_curr,
@@ -297,21 +302,20 @@ def analyze_strategy(df: pd.DataFrame) -> dict | None:
             **levels,
         }
 
-    # 2. OVERSOLD BOUNCE / LIQUIDITY GRAB REVERSAL (LONG)
-    big_red_prior = (float(p["close"]) < float(p["open"])) and (float(p["body"]) >= 2.0 * float(p["avg_body"]))
-    swept_low = (float(p["low"]) < prev_swing_low) or (float(c["low"]) < prev_swing_low)
-    green_recovery = (
-        (entry > float(c["open"]))
-        and (entry > float(p["close"]))
-        and (float(c["lower_wick"]) > 0)
+    # 3. DOWN (SHORT) कन्फ़र्मेशन: Squeeze के बाद मज़बूत लाल क्लोज़ + RSI < 45 (या 50 से नीचे क्रॉस) + वॉल्यूम स्पाइक
+    down_close_confirmed = (
+        (entry < open_curr)
+        and (entry < ema20_curr)
+        and (entry < bb_mid_curr)
+        and (entry <= bb_lower_curr * 1.004 or float(c["low"]) < bb_lower_curr)
     )
-    vol_confirmed = bool(c["vol_spike"] or p["vol_spike"])
+    down_rsi_confirmed = (rsi_curr <= 45.0) or ((rsi_prev > 50.0) and (rsi_curr <= 48.0))
 
-    if green_recovery and (swept_low or big_red_prior) and vol_confirmed:
-        levels = build_trade_levels(entry, "LONG")
+    if has_extreme_squeeze and down_close_confirmed and down_rsi_confirmed and strong_body and strong_volume:
+        levels = build_trade_levels(entry, "SHORT")
         return {
-            "side": "LONG",
-            "direction_badge": "🟢 LONG (Liquidity Grab Reversal)",
+            "side": "SHORT",
+            "direction_badge": "🔴 SHORT (Extreme Squeeze DOWN Breakdown)",
             "candle_time": str(c["timestamp"]),
             "ema_9": ema9_curr,
             "ema_20": ema20_curr,
