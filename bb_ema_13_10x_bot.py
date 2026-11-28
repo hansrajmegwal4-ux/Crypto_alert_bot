@@ -91,7 +91,7 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["bb_upper"] = df["bb_mid"] + (BB_STD * df["bb_std"])
     df["bb_lower"] = df["bb_mid"] - (BB_STD * df["bb_std"])
 
-    # Bollinger Band की चौड़ाई (Squeeze पहचानने के लिए)
+    # Bollinger Band की चौड़ाई और शुरुआती संकुचन/विस्तार
     df["bb_width"] = (df["bb_upper"] - df["bb_lower"]) / df["bb_mid"].replace(0, np.nan)
     df["bb_width_min_prev"] = df["bb_width"].shift(1).rolling(window=10).min()
     df["bb_width_pct_rank"] = df["bb_width"].shift(1).rolling(window=20).rank(pct=True)
@@ -100,71 +100,73 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ==========================================
-# 4. विक/क्लस्टर फ़िल्टर और सिग्नल लॉजिक
+# 4. पॉइंट-टू-पॉइंट कैंडल व ट्रेड फ़िल्टर
 # ==========================================
 def is_clean_candle(candle: pd.Series) -> bool:
-    """बहुत लंबी विक (spike) वाली कैंडल को फ़िल्टर करता है ताकि बॉडी स्पष्ट हो।"""
+    """मजबूत बॉडी वाली कैंडल चुनता है ताकि शुरुआती चाल में विक का शोर कम रहे।"""
     total_range = candle["high"] - candle["low"]
     body = abs(candle["close"] - candle["open"])
     if total_range <= 0:
         return False
-    return (body / total_range) >= 0.45
+    return (body / total_range) >= 0.50
 
 
 def evaluate_signal(df: pd.DataFrame) -> dict | None:
-    """अंतिम पूरी तरह बंद हुई 1h कैंडल (iloc[-2]) पर सिग्नल का मूल्यांकन करता है।"""
+    """अंतिम पूरी तरह बंद हुई 1h कैंडल (iloc[-2]) पर शुरुआती/स्पष्ट चाल परखता है।"""
     if len(df) < 30:
         return None
 
     c = df.iloc[-2]
     prev = df.iloc[-3]
 
-    # यदि दोनों EMA आपस में बहुत करीब उलझे हों (Sideways cluster), तो ट्रेड न लें
+    # साइडवेज़ क्लस्टर फ़िल्टर: EMA और मिड-बैंड के बीच बहुत कम अंतर हो तो छोड़ दें
     ema_gap_ratio = abs(c["ema_9"] - c["ema_20"]) / max(c["close"], 1e-9)
     if (
-        ema_gap_ratio < 0.0015
-        and abs(c["close"] - c["bb_mid"]) / max(c["close"], 1e-9) < 0.002
+        ema_gap_ratio < 0.0018
+        and abs(c["close"] - c["bb_mid"]) / max(c["close"], 1e-9) < 0.0025
     ):
         return None
 
     if not is_clean_candle(c):
         return None
 
+    # 11 चार्ट्स में दिखने वाली शुरुआती स्क्वीज़ या EMA से निकलने की अवस्था
     was_squeezed = (
-        pd.notna(c["bb_width_pct_rank"]) and c["bb_width_pct_rank"] <= 0.40
+        pd.notna(c["bb_width_pct_rank"]) and c["bb_width_pct_rank"] <= 0.45
     ) or (
         pd.notna(c["bb_width_min_prev"])
-        and prev["bb_width"] <= c["bb_width_min_prev"] * 1.15
+        and prev["bb_width"] <= c["bb_width_min_prev"] * 1.18
     )
 
-    # LONG सेटअप
-    bullish_breakout = (
+    # LONG सेटअप: बुलिश कैंडल + 9 व 20 EMA के ऊपर क्लोज़ + शुरुआती स्क्वीज़ या पिछली कैंडल पर EMA के नीचे/पास होना
+    bullish_setup = (
         c["close"] > c["open"]
         and c["close"] > c["ema_9"]
         and c["close"] > c["ema_20"]
-        and c["ema_9"] >= c["ema_20"] * 0.998
-        and (was_squeezed or prev["close"] <= prev["ema_20"])
+        and c["ema_9"] >= c["ema_20"] * 0.999
+        and (was_squeezed or prev["close"] <= prev["ema_20"] * 1.001)
     )
 
-    # SHORT सेटअप
-    bearish_breakdown = (
+    # SHORT सेटअप: बेयरिश कैंडल + 9 व 20 EMA के नीचे क्लोज़ + शुरुआती स्क्वीज़ या पिछली कैंडल पर EMA के ऊपर/पास होना
+    bearish_setup = (
         c["close"] < c["open"]
         and c["close"] < c["ema_9"]
         and c["close"] < c["ema_20"]
-        and c["ema_9"] <= c["ema_20"] * 1.002
-        and (was_squeezed or prev["close"] >= prev["ema_20"])
+        and c["ema_9"] <= c["ema_20"] * 1.001
+        and (was_squeezed or prev["close"] >= prev["ema_20"] * 0.999)
     )
 
-    if bullish_breakout:
+    if bullish_setup:
         entry = float(c["close"])
         sl = float(min(c["low"], c["ema_20"]) * 0.998)
         risk = entry - sl
-        if risk <= 0:
+        risk_pct = (risk / entry) * 100 if entry > 0 else 0
+        if risk <= 0 or risk_pct < 0.25:
             return None
 
         return {
             "side": "LONG",
-            "mode": "BB Squeeze / EMA Breakout",
+            "mode": "Early Squeeze / 9-20 EMA Move",
             "candle_time": str(c["timestamp"]),
             "entry": entry,
             "sl": sl,
@@ -174,16 +176,17 @@ def evaluate_signal(df: pd.DataFrame) -> dict | None:
             "ema_20": float(c["ema_20"]),
         }
 
-    if bearish_breakdown:
+    if bearish_setup:
         entry = float(c["close"])
         sl = float(max(c["high"], c["ema_20"]) * 1.002)
         risk = sl - entry
-        if risk <= 0:
+        risk_pct = (risk / entry) * 100 if entry > 0 else 0
+        if risk <= 0 or risk_pct < 0.25:
             return None
 
         return {
             "side": "SHORT",
-            "mode": "BB Squeeze / EMA Breakdown",
+            "mode": "Early Squeeze / 9-20 EMA Move",
             "candle_time": str(c["timestamp"]),
             "entry": entry,
             "sl": sl,
@@ -315,5 +318,5 @@ def run_bot_once() -> None:
 
 
 if __name__ == "__main__":
-    print("1h BB Squeeze + 9/20 EMA (13 Coins - Bybit/KuCoin) बॉट शुरू हो रहा है...")
+    print("1h BB Squeeze + 9/20 EMA (13 Coins - Point-to-Point) बॉट शुरू हो रहा है...")
     run_bot_once()
