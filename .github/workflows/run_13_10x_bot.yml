@@ -1,0 +1,41 @@
+name: Run 13 Coins 1h BB EMA 10x Bot
+
+on:
+  schedule:
+    # हर घंटे की 5वीं मिनट पर (UTC) — 1h कैंडल बंद होने के बाद चलाने के लिए
+    - cron: "5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install ccxt pandas requests
+
+      - name: Run 13-coin 10x alert script
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python bb_ema_13_10x_bot.py
+
+      - name: Save alert state to prevent duplicates
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add alerts_13_10x_state.json || true
+          git commit -m "Update 13-coin 10x alert state" || echo "No state changes"
+          git push || true
