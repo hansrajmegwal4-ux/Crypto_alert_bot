@@ -19,7 +19,7 @@ BB_STD = 2.0
 RR_T1 = 1.0
 RR_T2 = 3.0
 
-# 13 पेयर्स (आवश्यकतानुसार एक्सचेंज/फ़ीड के अनुसार समायोजित करें)
+# 13 पेयर्स
 SYMBOLS = [
     "NEAR/USDT",
     "DOT/USDT",
@@ -44,7 +44,42 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "YOUR_TELEGRAM_CHAT_ID")
 
 
 # ==========================================
-# 2. इंडिकेटर गणना (9 EMA, 20 EMA, BB 20,2)
+# 2. एक्सचेंज कनेक्शन (Bybit + KuCoin फ़ॉलबैक)
+# ==========================================
+def init_exchanges() -> list[tuple[str, ccxt.Exchange]]:
+    exchanges = []
+    configs = [
+        ("Bybit-Linear", ccxt.bybit({"enableRateLimit": True, "options": {"defaultType": "linear"}})),
+        ("Bybit-Spot", ccxt.bybit({"enableRateLimit": True, "options": {"defaultType": "spot"}})),
+        ("KuCoin-Spot", ccxt.kucoin({"enableRateLimit": True})),
+    ]
+    for label, ex in configs:
+        try:
+            ex.load_markets()
+            exchanges.append((label, ex))
+            print(f"[Connected] {label} ({len(ex.markets)} markets)")
+        except Exception as exc:
+            print(f"[Connection Warning] {label}: {exc}")
+    return exchanges
+
+
+def fetch_symbol_ohlcv(symbol: str, exchanges: list[tuple[str, ccxt.Exchange]]):
+    """Bybit या KuCoin में से जहाँ पेयर उपलब्ध हो, वहाँ से 1h OHLCV डेटा लाता है।"""
+    for label, ex in exchanges:
+        candidates = [symbol, f"{symbol}:USDT"]
+        for candidate in candidates:
+            if candidate in ex.markets:
+                try:
+                    ohlcv = ex.fetch_ohlcv(candidate, timeframe=TIMEFRAME, limit=100)
+                    if ohlcv and len(ohlcv) >= 30:
+                        return ohlcv, label
+                except Exception as exc:
+                    print(f"[Fetch Retry] {candidate} on {label}: {exc}")
+    return None, None
+
+
+# ==========================================
+# 3. इंडिकेटर गणना (9 EMA, 20 EMA, BB 20,2)
 # ==========================================
 def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
@@ -65,7 +100,7 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ==========================================
-# 3. विक/क्लस्टर फ़िल्टर और सिग्नल लॉजिक
+# 4. विक/क्लस्टर फ़िल्टर और सिग्नल लॉजिक
 # ==========================================
 def is_clean_candle(candle: pd.Series) -> bool:
     """बहुत लंबी विक (spike) वाली कैंडल को फ़िल्टर करता है ताकि बॉडी स्पष्ट हो।"""
@@ -162,7 +197,7 @@ def evaluate_signal(df: pd.DataFrame) -> dict | None:
 
 
 # ==========================================
-# 4. डुप्लिकेट अलर्ट रोकना और Telegram अलर्ट
+# 5. डुप्लिकेट अलर्ट रोकना और Telegram अलर्ट
 # ==========================================
 def load_state() -> dict:
     if os.path.exists(STATE_FILE):
@@ -180,8 +215,6 @@ def save_state(state: dict) -> None:
 
 
 def format_price(val: float) -> str:
-    if val >= 100:
-        return f"{val:.4f}"
     if val >= 1:
         return f"{val:.4f}"
     if val >= 0.01:
@@ -206,7 +239,7 @@ def send_telegram_message(text: str) -> None:
         print(f"Telegram भेजने में त्रुटि: {exc}")
 
 
-def format_alert(symbol: str, sig: dict) -> str:
+def format_alert(symbol: str, sig: dict, source_label: str) -> str:
     if sig["side"] == "LONG":
         direction_text = f"🟢 LONG ({sig['mode']})"
         trail_text = f"Close below 20 EMA ({format_price(sig['ema_20'])})"
@@ -217,7 +250,7 @@ def format_alert(symbol: str, sig: dict) -> str:
     return (
         f"🔱🏛️ हंसराज मेघवाल 🏛️🔱\n"
         f"📊 BB SQUEEZE + 9/20 EMA TRADING ALERT 📊\n\n"
-        f"🪙 Coin Pair: {symbol}\n"
+        f"🪙 Coin Pair: {symbol} ({source_label})\n"
         f"⏱️ Timeframe: 1H\n"
         f"📈 Direction: {direction_text}\n"
         f"🕯️ Candle: {sig['candle_time']}\n"
@@ -234,15 +267,24 @@ def format_alert(symbol: str, sig: dict) -> str:
 
 
 # ==========================================
-# 5. मुख्य रन लूप
+# 6. मुख्य रन लूप
 # ==========================================
 def run_bot_once() -> None:
-    exchange = ccxt.binance({"enableRateLimit": True})
+    exchanges = init_exchanges()
+    if not exchanges:
+        raise RuntimeError("Bybit या KuCoin किसी से भी कनेक्शन नहीं बन पाया।")
+
     state = load_state()
+    fetched_count = 0
 
     for symbol in SYMBOLS:
         try:
-            ohlcv = exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=100)
+            ohlcv, source_label = fetch_symbol_ohlcv(symbol, exchanges)
+            if not ohlcv:
+                print(f"[Not Available] {symbol} (Bybit/KuCoin पर उपलब्ध नहीं)")
+                continue
+
+            fetched_count += 1
             df = pd.DataFrame(
                 ohlcv, columns=["ts", "open", "high", "low", "close", "volume"]
             )
@@ -255,21 +297,23 @@ def run_bot_once() -> None:
             if sig:
                 signal_key = f"{symbol}_{sig['side']}_{sig['candle_time']}"
                 if state.get(symbol) != signal_key:
-                    msg = format_alert(symbol, sig)
+                    msg = format_alert(symbol, sig, source_label)
                     send_telegram_message(msg)
                     state[symbol] = signal_key
                     save_state(state)
+                    print(f"[Alert Sent] {signal_key} via {source_label}")
                 else:
                     print(f"[Skip Duplicate] {signal_key}")
             else:
-                print(f"[No Signal] {symbol} ({TIMEFRAME})")
+                print(f"[No Signal] {symbol} ({TIMEFRAME}) [{source_label}]")
 
-        except ccxt.BadSymbol:
-            print(f"[Symbol Not Found] {symbol} — अपने डेटा फ़ीड/एक्सचेंज के अनुसार सिंबल नाम जांचें।")
         except Exception as exc:
             print(f"[Error] {symbol}: {exc}")
 
+    if fetched_count == 0:
+        raise RuntimeError("किसी भी पेयर के लिए OHLCV डेटा प्राप्त नहीं हो सका।")
+
 
 if __name__ == "__main__":
-    print("1h BB Squeeze + 9/20 EMA (13 Coins) बॉट शुरू हो रहा है...")
+    print("1h BB Squeeze + 9/20 EMA (13 Coins - Bybit/KuCoin) बॉट शुरू हो रहा है...")
     run_bot_once()
