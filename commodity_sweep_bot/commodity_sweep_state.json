@@ -1,9 +1,13 @@
 {
   "date": "2026-11-28",
-  "trades_today": 0,
+  "trades_today": 1,
   "losses_today": 0,
-  "last_alert_ts": {},
-  "last_candle_ts": {},
+  "last_alert_ts": {
+    "GOLD": 1795824400
+  },
+  "last_candle_ts": {
+    "GOLD": 1795802400
+  },
   "stand_down_sent": false,
   "last_caution_note": "",
   "startup_test_sent": false
